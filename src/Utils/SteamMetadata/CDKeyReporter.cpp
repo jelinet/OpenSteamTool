@@ -82,6 +82,60 @@ namespace {
         return out;
     }
 
+    // ── 解析接口返回的 JSON（手写，不加依赖）──
+    // 限制：只取第一次出现的同名字段，不区分嵌套对象；不解码 \uXXXX（原样保留）。
+
+    // 找到 "name" 后面冒号之后第一个非空白字符的位置，找不到返回 npos。
+    size_t FindValue(const std::string& json, const char* name) {
+        const std::string needle = std::string("\"") + name + "\"";
+        size_t pos = json.find(needle);
+        if (pos == std::string::npos) return std::string::npos;
+        pos = json.find_first_not_of(" \t\r\n", pos + needle.size());
+        if (pos == std::string::npos || json[pos] != ':') return std::string::npos;
+        return json.find_first_not_of(" \t\r\n", pos + 1);
+    }
+
+    // 读取整数字段，也兼容写成字符串的数字（"1"）。
+    bool GetInt(const std::string& json, const char* name, int32_t& out) {
+        size_t pos = FindValue(json, name);
+        if (pos == std::string::npos) return false;
+        if (json[pos] == '"') ++pos;
+        bool neg = false;
+        if (pos < json.size() && json[pos] == '-') { neg = true; ++pos; }
+        if (pos >= json.size() || json[pos] < '0' || json[pos] > '9') return false;
+        int64_t v = 0;
+        while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+            v = v * 10 + (json[pos++] - '0');
+            if (v > INT32_MAX) return false;
+        }
+        out = static_cast<int32_t>(neg ? -v : v);
+        return true;
+    }
+
+    // 读取字符串字段，处理常见转义（\" \\ \/ \n \r \t）。
+    bool GetString(const std::string& json, const char* name, std::string& out) {
+        size_t pos = FindValue(json, name);
+        if (pos == std::string::npos || json[pos] != '"') return false;
+        out.clear();
+        for (++pos; pos < json.size(); ++pos) {
+            char c = json[pos];
+            if (c == '"') return true;
+            if (c == '\\' && pos + 1 < json.size()) {
+                char e = json[++pos];
+                switch (e) {
+                case 'n': out += '\n'; break;
+                case 'r': out += '\r'; break;
+                case 't': out += '\t'; break;
+                case 'u': out += "\\u"; break;   // 不解码，原样保留
+                default:  out += e;      break;  // \" \\ \/
+                }
+            } else {
+                out += c;
+            }
+        }
+        return false;   // 字符串没有结束引号
+    }
+
     // TODO: 上报的 JSON 格式，按你的接口修改。当前格式：
     //   {
     //     "key": "XXXXX-XXXXX-XXXXX", "steamid": "7656...",
@@ -188,21 +242,43 @@ std::string MaskKey(const std::string& key) {
     return std::string(key.size() - kVisible, '*') + key.substr(key.size() - kVisible);
 }
 
-bool SendReport(const Report& r) {
-    // 同步上报：在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
+ServerResponse SendReport(const Report& r) {
+    // 步骤 1：同步上报。在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
     const std::string body = BuildJson(r);
     auto res = OSTPlatform::Http::Execute(L"POST", kReportUrl,
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           kHeaders,
                                           kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
-    if (!res.ok || res.status < 200 || res.status >= 300) {
-        // 失败只写日志，不重试，不影响 Steam 的激活流程。
-        LOG_NETPACKET_WARN("CDKey report failed key={} status={} ok={}",
-                           MaskKey(r.key), res.status, res.ok);
-        return false;
+
+    ServerResponse out;
+    out.httpStatus = res.status;
+    out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
+    out.rawBody    = res.body;
+
+    // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）只写日志，不重试，不影响 Steam 的激活流程。
+    if (!out.httpOk) {
+        LOG_NETPACKET_WARN("CDKey report failed key={} status={} ok={} body={}",
+                           MaskKey(r.key), res.status, res.ok, res.body);
+        return out;
     }
-    LOG_NETPACKET_INFO("CDKey report sent key={} status={}", MaskKey(r.key), Status(r));
-    return true;
+
+    // 步骤 3：按 Steam 763 的字段解析接口返回的 JSON。
+    //   eresult 必须有，没有就当作格式不对；另外两个字段可选。
+    out.parsed = GetInt(res.body, "eresult", out.eresult);
+    if (!out.parsed) {
+        LOG_NETPACKET_WARN("CDKey report sent key={} but response has no eresult, body={}",
+                           MaskKey(r.key), res.body);
+        return out;
+    }
+    GetInt(res.body, "purchase_result_details", out.detail);
+    GetString(res.body, "error_message", out.errorMessage);
+
+    // 步骤 4：写日志。同时打出 Steam 的结果，方便对比两边是否一致。
+    LOG_NETPACKET_INFO("CDKey report sent key={} steam: eresult={} detail={} | "
+                       "server: eresult={} detail={} error_message={}",
+                       MaskKey(r.key), r.eresult, r.detail,
+                       out.eresult, out.detail, out.errorMessage);
+    return out;
 }
 
 } // namespace CDKeyReporter

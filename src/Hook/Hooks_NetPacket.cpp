@@ -897,7 +897,11 @@ namespace Hooks_NetPacket_CDKey {
                            report.detail, CDKeyReporter::Status(report));
 
         // 步骤 6：同步上报
-        CDKeyReporter::SendReport(report);   // 同步上报，失败只写日志
+        // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /
+        // error_message），SendReport 里已经写进日志。这里只记录，不会写回 Steam 的包；
+        // 想根据接口结果做别的事（例如弹提示），可以在这里用 server。
+        const CDKeyReporter::ServerResponse server = CDKeyReporter::SendReport(report);
+        (void)server;
     }
 
 } // namespace Hooks_NetPacket_CDKey

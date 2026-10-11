@@ -27,9 +27,24 @@ namespace CDKeyReporter {
     // 把结果归类成一个简短的状态字符串，例如 "activated"、"used_by_other_account"。
     const char* Status(const Report& r);
 
+    // 你的上报接口返回的结果。接口按 Steam 763 响应的字段返回 JSON，例如：
+    //   成功：{"eresult":1,"purchase_result_details":0,"error_message":""}
+    //   失败：{"eresult":2,"purchase_result_details":15,"error_message":"key 已被使用"}
+    // 字段含义和 Steam 的一样：eresult == 1 表示成功，purchase_result_details 是失败原因。
+    // 只用来记录 / 写日志，不会写回 Steam 的包。
+    struct ServerResponse {
+        bool        httpOk     = false;  // HTTP 请求成功且状态码是 2xx
+        uint32_t    httpStatus = 0;      // HTTP 状态码（请求没发出去时为 0）
+        bool        parsed     = false;  // 返回的 body 里解析到了 eresult
+        int32_t     eresult    = 0;      // 接口返回的 eresult（1 = 成功）
+        int32_t     detail     = 0;      // 接口返回的 purchase_result_details
+        std::string errorMessage;        // 接口返回的 error_message（没有时为空）
+        std::string rawBody;             // 接口返回的原始 body，方便排查
+    };
+
     // 同步发送：会阻塞调用方（Steam 网络线程）直到请求完成或超时。
-    // 成功（HTTP 2xx）返回 true；失败只写日志，返回 false。
-    bool SendReport(const Report& r);
+    // 返回值见 ServerResponse；失败只写日志，不重试。
+    ServerResponse SendReport(const Report& r);
 
     // 日志用：只显示 key 的最后 5 位。
     std::string MaskKey(const std::string& key);
