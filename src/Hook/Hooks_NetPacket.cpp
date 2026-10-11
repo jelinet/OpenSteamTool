@@ -946,7 +946,7 @@ namespace Hooks_NetPacket_CDKey {
         CMsgClientRegisterKey req;
         if (!req.ParseFromArray(pBody, cbBody) || !req.has_key()) {
             LOG_NETPACKET_WARN("CDKey send: failed to parse CMsgClientRegisterKey");
-            return false;
+            return true; // 拦下不发给 Steam，避免激活失败界面显示"未知错误"
         }
 
         // 步骤 2：解析 header，取 jobid_source 和 steamid
@@ -977,7 +977,7 @@ namespace Hooks_NetPacket_CDKey {
         std::lock_guard<std::mutex> lock(g_Mutex);
         g_Pending.push_back({jobId, req.key(), steamId});
         while (g_Pending.size() > kMaxPending) g_Pending.pop_front();
-        return false;
+        return true;
     }
 
     // 接收（eMsg 763）。步骤：
@@ -1031,19 +1031,19 @@ namespace Hooks_NetPacket_CDKey {
         }
 
         // 步骤 4：组装上报内容
-        CDKeyReporter::Report report;
-        report.key     = std::move(pending.key);
-        report.steamId = pending.steamId;
-        report.eresult = resp.eresult();
-        report.detail  = resp.purchase_result_details();
-        // Steam 响应的原样内容：原始字节 + header / body 里的其它字段
-        report.rawHeader.assign(reinterpret_cast<const char*>(pHdr), cbHdr);
-        report.rawBody.assign(reinterpret_cast<const char*>(pBody), cbBody);
-        report.receiptInfo = resp.purchase_receipt_info();
-        if (hdrOk) {
-            report.headerEresult      = hdr.eresult();
-            report.headerErrorMessage = hdr.error_message();
-        }
+        // CDKeyReporter::Report report;
+        // report.key     = std::move(pending.key);
+        // report.steamId = pending.steamId;
+        // report.eresult = resp.eresult();
+        // report.detail  = resp.purchase_result_details();
+        // // Steam 响应的原样内容：原始字节 + header / body 里的其它字段
+        // report.rawHeader.assign(reinterpret_cast<const char*>(pHdr), cbHdr);
+        // report.rawBody.assign(reinterpret_cast<const char*>(pBody), cbBody);
+        // report.receiptInfo = resp.purchase_receipt_info();
+        // if (hdrOk) {
+        //     report.headerEresult      = hdr.eresult();
+        //     report.headerErrorMessage = hdr.error_message();
+        // }
 
         // 步骤 5：写日志（debug 级别打出 Steam 响应的完整 header 和 body）
         LOG_NETPACKET_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
@@ -1052,12 +1052,12 @@ namespace Hooks_NetPacket_CDKey {
                            CDKeyReporter::MaskKey(report.key), report.eresult,
                            report.detail, CDKeyReporter::Status(report));
 
-        // 步骤 6：同步上报
-        // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /
-        // error_message），SendReport 里已经写进日志。这里只记录，不会写回 Steam 的包；
-        // 想根据接口结果做别的事（例如弹提示），可以在这里用 server。
-        const CDKeyReporter::ServerResponse server = CDKeyReporter::SendReport(report);
-        (void)server;
+        // // 步骤 6：同步上报
+        // // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /
+        // // error_message），SendReport 里已经写进日志。这里只记录，不会写回 Steam 的包；
+        // // 想根据接口结果做别的事（例如弹提示），可以在这里用 server。
+        // const CDKeyReporter::ServerResponse server = CDKeyReporter::SendReport(report);
+        // (void)server;
     }
 
 } // namespace Hooks_NetPacket_CDKey
