@@ -147,11 +147,30 @@ namespace {
 //  中文说明：发出 PICS 商品信息请求（8903）时，给 addappid 里配置了
 //  access_token 的 app 填上 token，让 Steam 能拿到这些 app 的完整信息。
 //  会改发送包。
+//
+//  背景：PICS（Product Info Cache Server）是 Steam 用来获取 app / package 元数据
+//  （名字、depot 列表、清单 id、启动项等）的接口。部分受保护的游戏或 DLC，
+//  请求里必须带正确的 access_token 才能拿到完整信息；没有的话服务器只返回
+//  不完整的数据，Steam 就没法下载。这个 token 一般只有拥有者才会拿到。
+//  token 来自 Lua 配置里的 addtoken(appid, "token")，例如：
+//      addtoken(1361510, "2764735786934684318")
+//
+//  步骤（HandleSend）：
+//    1. 解析发送包 body 为 CMsgClientPICSProductInfoRequest；
+//    2. 先快速扫一遍：有没有 app 既在 addappid 里又配置了 token，
+//       没有就返回 false，原包照常发送；
+//    3. 再逐个 app 处理：在 addappid 里且有 token 的，把 access_token 改成配置的值；
+//       在 addappid 里但没配置 token 的，跳过并写警告；不在 addappid 里的不动；
+//    4. 把修改后的请求序列化到 g_SendNewBody，大小写进 g_cbSendNewBody；
+//    5. 返回 true，SendJob 会设置 g_NeedReplaceSend，发送 hook 里的
+//       ReplaceSendPacket 用 [MsgHdr] [原 header] [新 body] 重新组包发出。
+//       header 不改，只换 body。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_AccessToken {
 
     bool HandleSend(const uint8* pBody, uint32 cbBody)
     {
+        // 步骤 1：解析请求。请求里 apps 是要查询的 app 列表，每项有 appid 和 access_token。
         CMsgClientPICSProductInfoRequest req;
         if (!req.ParseFromArray(pBody, cbBody)) {
             LOG_PICS_WARN("Failed to ParseFromArray CMsgClientPICSProductInfoRequest");
@@ -159,6 +178,8 @@ namespace Hooks_NetPacket_AccessToken {
         }
         LOG_PICS_DEBUG("CMsgClientPICSProductInfoRequest original body:\n{}", req.DebugString());
 
+        // 步骤 2：先只读地扫一遍，判断有没有需要注入 token 的 app。
+        // 大部分 PICS 请求都不涉及 addappid 的游戏，这样可以避免无谓的重新序列化。
         bool needsPatch = false;
         for (const auto& app : req.apps()) {
             if (LuaConfig::HasDepot(app.appid()) && LuaConfig::GetAccessToken(app.appid())) {
@@ -172,6 +193,8 @@ namespace Hooks_NetPacket_AccessToken {
             return false;
         }
 
+        // 步骤 3：逐个 app 注入 token（mutable_apps 拿可修改的列表）。
+        // 三个计数只用来写日志：已注入 / 在 addappid 里但没配 token / 不在 addappid 里。
         int injected = 0, noToken = 0, notAddAppId = 0;
         for (auto& app : *req.mutable_apps()) {
             if (LuaConfig::HasDepot(app.appid())) {
@@ -193,6 +216,8 @@ namespace Hooks_NetPacket_AccessToken {
         LOG_PICS_DEBUG("CMsgClientPICSProductInfoRequest: injected={} no_token={} not_in_add_appid={} total={}",
                    injected, noToken, notAddAppId, req.apps_size());
 
+        // 步骤 4：序列化到发送替换缓冲 g_SendNewBody。超出缓冲大小或序列化失败时
+        // 返回 false，不替换，原包照常发送（这时 token 没注入，但不会弄坏请求）。
         g_cbSendNewBody = static_cast<uint32>(req.ByteSizeLong());
         if (g_cbSendNewBody > kMaxBodySize) {
             LOG_PICS_WARN("CMsgClientPICSProductInfoRequest: encoded size {} exceeds buffer", g_cbSendNewBody);
@@ -204,6 +229,7 @@ namespace Hooks_NetPacket_AccessToken {
         }
 
         LOG_PICS_DEBUG("CMsgClientPICSProductInfoRequest: modified body: {}", req.DebugString());
+        // 步骤 5：返回 true，表示发送包体需要换成 g_SendNewBody。
         return true;
     }
 
