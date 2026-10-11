@@ -34,10 +34,10 @@
 //  │                │                              │ （eresult=OK、填下载码）     │ （std::async 后台）    │
 //  │ Cloud          │ 云存档相关 service method    │ 不改 body：拦下不发          │ 不调（本地 Cloud-      │
 //  │                │                              │ （g_SuppressSend），本地回包 │ Redirect 处理）        │
-//  │ CDKey          │ 发送 743：先校验机器码       │ 允许：不改；拒绝：拦下不发， │ 调 CDKeyReporter       │
-//  │                │                              │ 本地回失败的 763（不伪造成功）│ （同步校验）           │
-//  │                │ 接收 763                     │ 不改，只读记录               │ 调 CDKeyReporter       │
-//  │                │                              │                              │ （同步上报）           │
+//  │ CDKey          │ 发送 Store.RegisterCDKey#1   │ 一律拦下不发（g_Suppress-    │ 调 CDKeyReporter       │
+//  │                │ ：先校验机器码               │ Send），本地回接口结果的 147 │ （同步校验）           │
+//  │                │ 接收 Store.RegisterCDKey#1   │ 不改，只读记录               │ 不调（上报已注释）     │
+//  │                │ 响应                         │                              │                        │
 //  └────────────────┴──────────────────────────────┴──────────────────────────────┴────────────────────────┘
 //
 //  UserStats "可能调"：借用账号来自 LuaConfig::GetStatSteamId(appid)：
@@ -189,7 +189,7 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");      // 家庭共享：正在运行的游戏通知
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");                            // 成就 / 统计数据
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");  // 清单下载码
-    constexpr uint32 Hooks_NetPacket_CDKey = Fnv1aHash("Store.RegisterCDKey#1");
+    constexpr uint32 HASH_JOB_RegisterCDKey = Fnv1aHash("Store.RegisterCDKey#1");                          // 激活 CDKey
 } // anonymous namespace
 
 
@@ -805,24 +805,27 @@ namespace Hooks_NetPacket_Manifest {
 // ════════════════════════════════════════════════════════════════
 //  Hooks_NetPacket_CDKey
 //
-//  发出：CMsgClientRegisterKey      (eMsg 743)  —— 激活游戏 CDKey
-//  收到：CMsgClientPurchaseResponse (eMsg 763)  —— 激活结果
+//  发出：Store.RegisterCDKey#1 请求   (eMsg 151, CStore_RegisterCDKey_Request)  —— 激活游戏 CDKey
+//  收到：Store.RegisterCDKey#1 响应   (eMsg 147, CStore_RegisterCDKey_Response) —— 激活结果
 //
-//  发送 743 之前，先同步调用你的校验接口（key + steamid + 机器码）：
-//    允许：743 原样发出，记下 key；收到 763 后把 key + 结果交给 CDKeyReporter 同步上报。
-//          这条路径两个方向的包都不改。
-//    拒绝（包括接口连不上 / 超时）：743 拦下不发给 Steam，并在本地造一个
-//          失败的 763（eresult = Fail）注入给 Steam，界面会显示激活失败。
-//          只会造失败响应，不会伪造成功。
+//  （2026-10-11 从老的 eMsg 743/763 改过来：实测客户端"激活产品"发的是这个 service method，
+//   743 根本不触发。字段号来自 SteamDatabase/Protobufs 的 steammessages_store.steamclient.proto，
+//   还没有拿真机的包核对过；解析失败时看 debug 日志里 "CDKey send/recv" 的输出。）
 //
-//  背景：在 Steam 客户端里"激活产品"时，客户端发 743，body 里只有 key；
-//  服务器回 763，body 里有 eresult（1 = 成功）和 purchase_result_details
-//  （失败原因，例如 15 = 已被其他账号激活）。763 的 body 里不带 key，
-//  所以要在发送时把 key 记下来，收到响应时再对上。
+//  发送之前，先同步调用你的校验接口（key + steamid + 机器码）。接口返回的字段和
+//  Steam 响应一致：eresult（header）、purchase_result_details（body）、error_message（header）。
+//  请求一律拦下不发给 Steam，并在本地造一个 147 响应，把接口的这三个值原样注入给 Steam：
+//    接口返回 eresult = 1：界面显示激活成功（但请求没发给 Steam，key 不会被 Steam 激活）；
+//    接口返回失败 / 连不上 / 超时 / 没有 eresult：界面显示失败，按 eresult = 2、detail = 14 处理。
+//  （2026-10-11 之前是"允许就放行、拒绝才造失败响应"，改成了统一拦下、回接口的值。）
+//
+//  背景：在 Steam 客户端里"激活产品"时，请求 body 里只有 activation_code（key）；
+//  成败在响应 header 的 eresult 里，body 里是 purchase_result_details
+//  （失败原因，例如 15 = 已被其他账号激活）。
 //
 //  请求和响应怎么对上：
-//    发送包 header 的 jobid_source == 响应包 header 的 jobid_target。
-//    响应没带有效 job id 时，退一步按发送顺序取最早的一个（FIFO）。
+//    响应 header 的 jobid_target = 请求 header 的 jobid_source。
+//  下面的 HandleRecv 只在 Steam 真的回了响应时才会触发；现在请求都被拦下，正常情况下不会走到。
 //
 //  只能看到这台电脑上、装了本工具的 Steam 客户端发起的激活，
 //  别人在其他电脑上激活你的 key，这里收不到。
@@ -853,22 +856,25 @@ namespace Hooks_NetPacket_CDKey {
     // 0 和 ~0 都当作"没有 job id"。
     inline bool IsValidJobId(uint64 id) { return id != 0 && id != kInvalidJobId; }
 
-    // 拒绝激活时本地造好的 763 失败响应包（完整的 [MsgHdr][header][body]），
+    // 本地造好的 147 响应包（完整的 [MsgHdr][header][body]），
     // 等 RecvPkt 下一次被调用时由 Drain 交给 Steam。用 g_Mutex 保护。
     std::deque<std::vector<uint8>> g_InjectQueue;
 
-    // 造一个"激活失败"的 763，放进 g_InjectQueue。
-    //   header：jobid_target = 请求的 jobid_source（Steam 靠它对上是哪次激活），
-    //           eresult = k_EResultFail，steamid / client_sessionid 照抄请求；
-    //   body：  eresult = k_EResultFail，purchase_result_details = detail（失败原因）。
-    // eresult 写死为失败：这里只会造失败响应，不会让 Steam 以为激活成功。
-    // 组包失败时只写日志：743 已经被拦下，Steam 等不到响应会自己超时。
-    void QueueFailResponse(const CMsgProtoBufHeader* reqHdr, int32 detail)
+    // 把校验接口的结果造成一个 147 响应，放进 g_InjectQueue。
+    //   header：target_job_name = Store.RegisterCDKey#1，
+    //           jobid_target = 请求的 jobid_source（Steam 靠它对上是哪次激活），
+    //           eresult / error_message = 接口返回的值，steamid / client_sessionid 照抄请求；
+    //   body：  purchase_result_details = detail。
+    // （2026-10-11 之前这里写死 eresult = Fail、只造失败响应；现在按接口返回的值原样造，
+    //  接口返回 eresult = 1 时界面会显示激活成功，但请求并没有发给 Steam，key 不会真的被激活。
+    //  这是有意为之：校验和激活都由你的接口负责。）
+    // 组包失败时只写日志：请求已经被拦下，Steam 等不到响应会自己超时。
+    void QueueResponse(const CMsgProtoBufHeader* reqHdr, int32 eresult, int32 detail,
+                       const std::string& errorMessage)
     {
-        constexpr int32 kFail = static_cast<int32>(k_EResultFail);
-
         CMsgProtoBufHeader respHdr;
-        respHdr.set_eresult(kFail);
+        respHdr.set_eresult(eresult);
+        if (!errorMessage.empty()) respHdr.set_error_message(errorMessage);
         if (reqHdr) {
             if (IsValidJobId(reqHdr->jobid_source()))
                 respHdr.set_jobid_target(reqHdr->jobid_source());
@@ -878,8 +884,9 @@ namespace Hooks_NetPacket_CDKey {
                 respHdr.set_client_sessionid(reqHdr->client_sessionid());
         }
 
-        CMsgClientPurchaseResponse resp;
-        resp.set_eresult(kFail);
+        respHdr.set_target_job_name("Store.RegisterCDKey#1");
+
+        CStore_RegisterCDKey_Response resp;
         resp.set_purchase_result_details(detail);
 
         // 按 [MsgHdr(eMsg + header 长度)][header][body] 拼成完整的包
@@ -888,11 +895,11 @@ namespace Hooks_NetPacket_CDKey {
         std::vector<uint8> pkt(sizeof(MsgHdr) + cbRespHdr + cbRespBody);
         auto* mhdr = reinterpret_cast<MsgHdr*>(pkt.data());
         mhdr->eMsg = static_cast<EMsg>(
-            static_cast<uint32>(k_EMsgClientPurchaseResponse) | kMsgHdrProtoFlag);
+            static_cast<uint32>(k_EMsgServiceMethodResponse) | kMsgHdrProtoFlag);
         mhdr->headerLength = cbRespHdr;
         if (!respHdr.SerializeToArray(pkt.data() + sizeof(MsgHdr), cbRespHdr) ||
             !resp.SerializeToArray(pkt.data() + sizeof(MsgHdr) + cbRespHdr, cbRespBody)) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey: failed to build fail response");
+            LOG_REGISTERCDKEY_DEBUG("CDKey: failed to build response");
             return;
         }
 
@@ -901,7 +908,7 @@ namespace Hooks_NetPacket_CDKey {
             g_InjectQueue.push_back(std::move(pkt));
     }
 
-    // 把 g_InjectQueue 里的 763 交给 Steam。在 RecvPkt hook 开头调用：
+    // 把 g_InjectQueue 里的 147 交给 Steam。在 RecvPkt hook 开头调用：
     // 借用当前收到的包（pCarrier）当载体，临时把它的数据指针换成伪造包，
     // 调一次原始接收函数，再换回来（和 Cloud::Drain 一样的做法）。
     // 注入的包直接交给原函数，不经过 RecvJob，所以不会触发 HandleRecv 上报；
@@ -925,28 +932,28 @@ namespace Hooks_NetPacket_CDKey {
             invokeOriginal(pThis, pCarrier);
             pCarrier->m_pubData = origData;
             pCarrier->m_cubData = origSize;
-            LOG_REGISTERCDKEY_DEBUG("CDKey: delivered local fail response ({} bytes)", pkt.size());
+            LOG_REGISTERCDKEY_DEBUG("CDKey: delivered local response ({} bytes)", pkt.size());
         }
     }
 
-    // 发送（eMsg 743）。步骤：
-    //   1. 解析 body 为 CMsgClientRegisterKey，取出 key；解析失败或没有 key 就不处理（原包照发）；
+    // 发送（Store.RegisterCDKey#1 请求）。步骤：
+    //   1. 解析 body 为 CStore_RegisterCDKey_Request，取出 activation_code；
+    //      解析失败或没有 key 就拦下（见下面 return true 的注释）；
     //   2. 解析 header，取出 jobid_source 和 steamid（header 解析失败时
     //      jobId 记为无效值，之后只能靠 FIFO 匹配）；
     //   3. 写日志（key 掩码，只显示最后 5 位）；
     //   4. 同步调用你的校验接口（key + steamid + 机器码），网络线程会等它返回；
-    //   5. 拒绝（包括接口连不上 / 超时）：本地造一个失败的 763 等待注入，返回 true，
-    //      SendJob 据此设置 g_SuppressSend，743 不发给 Steam，key 不会被激活；
-    //   6. 允许：加锁放进 g_Pending 队尾（超过 kMaxPending 就丢掉最旧的），
-    //      返回 false，743 原样发给 Steam，之后照常等 763 并上报结果。
+    //   5. 不论接口返回成功还是失败（包括连不上 / 超时，此时按失败 eresult=2 / detail=14），
+    //      都把接口的 eresult / detail / error_message 造成 147 等待注入，返回 true，
+    //      SendServiceJob 据此设置 g_SuppressSend，请求不发给 Steam，key 不会被 Steam 激活。
     bool HandleSend(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
         // 步骤 1：解析请求 body，取 key
-        CMsgClientRegisterKey req;
-        LOG_REGISTERCDKEY_DEBUG("CDKey send: parsing CMsgClientRegisterKey...");
-        if (!req.ParseFromArray(pBody, cbBody) || !req.has_key()) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey send: failed to parse CMsgClientRegisterKey");
+        CStore_RegisterCDKey_Request req;
+        LOG_REGISTERCDKEY_DEBUG("CDKey send: parsing CStore_RegisterCDKey_Request...");
+        if (!req.ParseFromArray(pBody, cbBody) || !req.has_activation_code()) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey send: failed to parse CStore_RegisterCDKey_Request");
             return true; // 拦下不发给 Steam，避免激活失败界面显示"未知错误"
         }
 
@@ -960,47 +967,37 @@ namespace Hooks_NetPacket_CDKey {
         }
 
         // 步骤 3：写日志（key 掩码）
-        LOG_REGISTERCDKEY_DEBUG("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.key()), jobId);
+        LOG_REGISTERCDKEY_DEBUG("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.activation_code()), jobId);
 
         // 步骤 4：同步校验机器码
         const CDKeyReporter::CheckResponse check =
-            CDKeyReporter::CheckBeforeActivate(req.key(), steamId);
+            CDKeyReporter::CheckBeforeActivate(req.activation_code(), steamId);
 
-        // 步骤 5：拒绝 → 拦下 743，本地回失败的 763
-        if (!check.allow) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey send: blocked key={} detail={}",
-                               CDKeyReporter::MaskKey(req.key()), check.detail);
-            QueueFailResponse(hdrOk ? &hdr : nullptr, check.detail);
-            return true;
-        }
-
-        // 步骤 6：允许 → 记进待匹配队列，743 原样发出
-        std::lock_guard<std::mutex> lock(g_Mutex);
-        g_Pending.push_back({jobId, req.key(), steamId});
-        while (g_Pending.size() > kMaxPending) g_Pending.pop_front();
+        // 步骤 5：一律拦下请求，把接口的结果造成 147 回给界面
+        LOG_REGISTERCDKEY_DEBUG("CDKey send: blocked key={} eresult={} detail={}",
+                                CDKeyReporter::MaskKey(req.activation_code()),
+                                check.eresult, check.detail);
+        QueueResponse(hdrOk ? &hdr : nullptr, check.eresult, check.detail, check.errorMessage);
         return true;
     }
 
-    // 接收（eMsg 763）。步骤：
-    //   1. 解析 body 为 CMsgClientPurchaseResponse，取 eresult 和 purchase_result_details；
-    //   2. 解析 header，取 jobid_target；
+    // 接收（Store.RegisterCDKey#1 响应）。步骤：
+    //   1. 解析 body 为 CStore_RegisterCDKey_Response，取 purchase_result_details；
+    //   2. 解析 header，取 jobid_target 和 eresult（成败在 header 里，body 里没有）；
     //   3. 加锁在 g_Pending 里找对应的请求：有有效 job id 就精确匹配，
-    //      没有就取最早的一个；找不到说明不是 CDKey 激活（比如商店购买），直接忽略；
+    //      没有就取最早的一个；找不到就直接忽略；
     //      找到后从队列里移除；
-    //   4. 组装 CDKeyReporter::Report（key、steamId、eresult、detail，
-    //      以及 Steam 响应的原样内容：原始 header / body 字节、header 的 eresult 和
-    //      error_message、body 的 purchase_receipt_info）；
-    //   5. 写日志（key 掩码，附带归类后的 status，例如 activated / used_by_other_account）；
-    //   6. 同步上报到你的 HTTP 接口，失败只写日志。
+    //   4. （组装 CDKeyReporter::Report 和同步上报已注释掉，见函数体内）；
+    //   5. 写日志（key 掩码、header eresult、purchase_result_details）。
     // 第 3 步结束就释放锁，HTTP 请求不会在持有锁时进行。
     // 同样不设置 g_NeedReplaceBody / g_NeedReplaceHdr，接收包原样交给 Steam。
     void HandleRecv(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
         // 步骤 1：解析响应 body
-        CMsgClientPurchaseResponse resp;
+        CStore_RegisterCDKey_Response resp;
         if (!resp.ParseFromArray(pBody, cbBody)) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey recv: failed to parse CMsgClientPurchaseResponse");
+            LOG_REGISTERCDKEY_DEBUG("CDKey recv: failed to parse CStore_RegisterCDKey_Response");
             return;
         }
 
@@ -1023,7 +1020,7 @@ namespace Hooks_NetPacket_CDKey {
                 it = g_Pending.begin();
             }
             if (it == g_Pending.end()) {
-                // 763 也用于商店购买等其它场景，找不到对应的 key 就忽略。
+                // 找不到对应的 key（不是本工具拦下的那次激活）就忽略。
                 LOG_REGISTERCDKEY_DEBUG("CDKey recv: no pending key for jobid={}", jobId);
                 return;
             }
@@ -1049,12 +1046,13 @@ namespace Hooks_NetPacket_CDKey {
         // 步骤 5：写日志（debug 级别打出 Steam 响应的完整 header 和 body）
         LOG_REGISTERCDKEY_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
         LOG_REGISTERCDKEY_DEBUG("CDKey recv raw body:\n{}", resp.DebugString());
-        LOG_REGISTERCDKEY_DEBUG("CDKey recv: key={} eresult={} detail={} status={}",
-                           CDKeyReporter::MaskKey(report.key), report.eresult,
-                           report.detail, CDKeyReporter::Status(report));
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: key={} eresult={} detail={}",
+                                CDKeyReporter::MaskKey(pending.key),
+                                hdrOk ? hdr.eresult() : -1,
+                                resp.purchase_result_details());
 
         // // 步骤 6：同步上报
-        // // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /
+        // // 返回值是你的接口按 Steam 格式返回的结果（eresult / purchase_result_details /
         // // error_message），SendReport 里已经写进日志。这里只记录，不会写回 Steam 的包；
         // // 想根据接口结果做别的事（例如弹提示），可以在这里用 server。
         // const CDKeyReporter::ServerResponse server = CDKeyReporter::SendReport(report);
@@ -1642,6 +1640,11 @@ namespace {
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
+        // 激活 CDKey：先校验机器码，拒绝就拦下不发并本地回失败的 147
+        case HASH_JOB_RegisterCDKey:
+            g_SuppressSend = Hooks_NetPacket_CDKey::HandleSend(pBody, cbBody, pHdr, cbHdr);
+            return false;
+
         // ---- add new 151 service methods here ----
         }
         return false;
@@ -1675,10 +1678,6 @@ namespace {
         case k_EMsgClientGamesPlayed:                 // 742  上报正在玩的游戏
         case k_EMsgClientGamesPlayedWithDataBlob:     // 5410 同上（带数据块）：OnlineFix 改游戏名 + 记录正在玩
             g_NeedReplaceSend = Hooks_NetPacket_OnlineFix::HandleSend(pBody, cbBody, pHdr, cbHdr);
-            return;
-
-        case k_EMsgClientRegisterKey:                 // 743  激活 CDKey：先校验机器码，拒绝就拦下不发
-            g_SuppressSend = Hooks_NetPacket_CDKey::HandleSend(pBody, cbBody, pHdr, cbHdr);
             return;
 
         case k_EMsgClientRichPresenceUpload:           // 7501 上传富状态：记下键值，用于注入 766（不改包）
@@ -1727,6 +1726,11 @@ namespace {
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
+        // 激活 CDKey 的响应：对上之前记下的 key，只写日志
+        case HASH_JOB_RegisterCDKey:
+            Hooks_NetPacket_CDKey::HandleRecv(pBody, cbBody, pHdr, cbHdr);
+            return;
+
         // ---- add new 147 service methods here ----
         }
     }
@@ -1765,10 +1769,6 @@ namespace {
         case k_EMsgClientGetUserStatsResponse:     // 819  旧版成就 / 统计响应：eresult 改 OK，叠加 CloudRedirect 成就
             g_NeedReplaceBody = Hooks_NetPacket_UserStats::HandleRecv_ClientGetUserStatsResponse(
                 pBody, cbBody);
-            return;
-
-        case k_EMsgClientPurchaseResponse:             // 763  CDKey 激活结果（只记录，不改包）
-            Hooks_NetPacket_CDKey::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
         case k_EMsgClientSharedLibraryStopPlaying:     // 9406 家庭共享"停止游戏"通知：清空消息体
@@ -1833,7 +1833,7 @@ namespace {
 
     // 接收 hook：Steam 每收到 CM 服务器的一个包都会调用，交给 Steam 处理之前先经过这里。
     // 流程：
-    //   1. 先借这个包注入待发的伪造包（RichPresence 的 766、Cloud 的 147 响应、CDKey 的 763 失败响应）；
+    //   1. 先借这个包注入待发的伪造包（RichPresence 的 766、Cloud 的 147 响应、CDKey 的 147 失败响应）；
     //   2. 拆包 → RecvJob 分发；
     //   3. 处理函数要求替换时，把新的 header / body 写回这个包；
     //   4. 最后交给原函数 oRecvPkt，让 Steam 继续处理。
@@ -1847,7 +1847,7 @@ namespace {
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 
-        // CDKey 机器码校验拒绝时本地造的 763 失败响应
+        // CDKey 机器码校验拒绝时本地造的 147 失败响应
         Hooks_NetPacket_CDKey::Drain(
             pThis, pPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });

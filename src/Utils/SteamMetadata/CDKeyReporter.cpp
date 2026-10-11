@@ -341,31 +341,31 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
     out.rawBody    = res.body;
 
-    // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）一律拒绝。
+    // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）按失败处理：eresult / detail 保持默认 2 / 14。
     if (!out.httpOk) {
-        LOG_REGISTERCDKEY_DEBUG("CDKey check failed key={} status={} ok={} -> deny",
+        LOG_REGISTERCDKEY_DEBUG("CDKey check failed key={} status={} ok={} -> fail",
                            MaskKey(key), res.status, res.ok);
         return out;
     }
 
-    // 步骤 3：解析 allow。没有 allow 字段也当作拒绝。
-    bool allow = false;
-    if (!GetBool(res.body, "allow", allow)) {
-        LOG_REGISTERCDKEY_DEBUG("CDKey check key={} response has no allow, body={} -> deny",
+    // 步骤 3：解析 eresult。没有 eresult 字段也按失败处理（保持默认 2 / 14）。
+    int32_t eresult = 0;
+    if (!GetInt(res.body, "eresult", eresult)) {
+        LOG_REGISTERCDKEY_DEBUG("CDKey check key={} response has no eresult, body={} -> fail",
                            MaskKey(key), res.body);
         return out;
     }
-    out.allow = allow;
+    out.eresult = eresult;
 
-    // 步骤 4：拒绝时读取失败原因（可选字段）。
-    if (!allow) {
-        int32_t detail = 0;
-        if (GetInt(res.body, "purchase_result_details", detail)) out.detail = detail;
-        GetString(res.body, "error_message", out.errorMessage);
-    }
+    // 步骤 4：读取 purchase_result_details 和 error_message（都是可选字段）。
+    // 成功（eresult == 1）时 detail 默认 0；失败时没给就保持 14。
+    if (eresult == 1) out.detail = 0;
+    int32_t detail = 0;
+    if (GetInt(res.body, "purchase_result_details", detail)) out.detail = detail;
+    GetString(res.body, "error_message", out.errorMessage);
 
-    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} allow={} detail={} error_message={}",
-                       MaskKey(key), out.allow, out.detail, out.errorMessage);
+    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={}",
+                       MaskKey(key), out.eresult, out.detail, out.errorMessage);
     return out;
 }
 

@@ -47,22 +47,27 @@ namespace CDKeyReporter {
     ServerResponse SendReport(const Report& r);
 
     // ── 激活前的机器码校验 ──
-    // 你的校验接口返回 JSON，例如：
-    //   允许：{"allow":true}
-    //   拒绝：{"allow":false,"purchase_result_details":15,"error_message":"key 已绑定其他机器"}
-    // 拒绝时 purchase_result_details 决定 Steam 界面显示的失败原因，不填默认 14（无效 key）。
+    // （2026-10-11 从 {"allow":...} 改成 Steam 响应的字段：激活请求一律拦下，
+    //  把接口返回的结果原样造成 Store.RegisterCDKey#1 的响应给界面。）
+    // 你的校验接口返回 JSON，字段和 Steam 响应一致，例如：
+    //   成功：{"eresult":1,"purchase_result_details":0,"error_message":""}
+    //   失败：{"eresult":2,"purchase_result_details":15,"error_message":"key 已被使用"}
+    // eresult 对应响应 header 的 eresult（1 = 成功，失败用 2），
+    // purchase_result_details 对应响应 body（0 = 无错误，14 = 无效码，15 = 已被使用），
+    // error_message 对应响应 header 的 error_message（可选）。
     struct CheckResponse {
-        bool        allow      = false;  // true = 放行，激活请求照常发给 Steam
         bool        httpOk     = false;  // HTTP 请求成功且状态码是 2xx
         uint32_t    httpStatus = 0;      // HTTP 状态码（请求没发出去时为 0）
-        int32_t     detail     = 14;     // 拒绝时回给 Steam 的 purchase_result_details
-        std::string errorMessage;        // 接口返回的 error_message（只写日志）
+        int32_t     eresult    = 2;      // 回给 Steam 界面的 eresult；默认 2（Fail）
+        int32_t     detail     = 14;     // 回给 Steam 界面的 purchase_result_details；默认 14（无效 key）
+        std::string errorMessage;        // 接口返回的 error_message（写进响应 header）
         std::string rawBody;             // 接口返回的原始 body，方便排查
     };
 
-    // 激活前同步调用校验接口（在 Steam 网络线程里、743 发出之前执行）。
+    // 激活前同步调用校验接口（在 Steam 网络线程里、激活请求发出之前执行）。
     // 请求 JSON：{"key":"...","steamid":"7656...","machine_id":"..."}
-    // 接口连不上、超时、非 2xx、返回里没有 allow 字段：一律当作拒绝（allow = false）。
+    // 接口连不上、超时、非 2xx、返回里没有 eresult 字段：eresult / detail 保持默认
+    // （2 / 14），即按失败处理。
     CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId);
 
     // 本机机器码：读注册表 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
