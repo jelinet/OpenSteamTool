@@ -125,9 +125,11 @@ namespace {
     }
 
     // ── Hash constants for target_job_name dispatch ─────────────
-    constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
-    constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
-    constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
+    // Service Method 名字的 FNV-1a 哈希，用在下面分发函数的 switch 里。
+    // 新增要拦截的 service method 时，在这里加一个常量。
+    constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");      // 家庭共享：正在运行的游戏通知
+    constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");                            // 成就 / 统计数据
+    constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");  // 清单下载码
 
 } // anonymous namespace
 
@@ -136,6 +138,10 @@ namespace {
 //  Hooks_NetPacket_AccessToken
 //
 //  Outgoing: CMsgClientPICSProductInfoRequest (eMsg 8903)
+//
+//  中文说明：发出 PICS 商品信息请求（8903）时，给 addappid 里配置了
+//  access_token 的 app 填上 token，让 Steam 能拿到这些 app 的完整信息。
+//  会改发送包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_AccessToken {
 
@@ -206,6 +212,12 @@ namespace Hooks_NetPacket_AccessToken {
 //            CMsgClientGetUserStats        (eMsg 818)
 //  Incoming: CPlayer_GetUserStats_Response (eMsg 147 ← target: Player.GetUserStats#1)
 //            CMsgClientGetUserStatsResponse(eMsg 819)
+//
+//  中文说明：成就 / 统计数据请求。
+//  发送（151 Player.GetUserStats#1、818）：把查询的 SteamID 换成配置里的
+//    统计账号（GetStatSteamId），818 还会强制重新下载 schema。
+//  接收（147、819）：把 eresult 改成 OK，清掉借来的统计数据，
+//    819 还会叠加 CloudRedirect 同步的成就。会改发送包和接收包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_UserStats {
 
@@ -416,6 +428,11 @@ namespace Hooks_NetPacket_UserStats {
 //  Hooks_NetPacket_ETicket
 //
 //  Incoming: CMsgClientRequestEncryptedAppTicketResponse (eMsg 5527)
+//
+//  中文说明：加密应用票据响应（5527）。Steam 返回失败时，从本地凭据
+//  库取票据填进去并把 eresult 改成 OK。
+//  注意：分发里这个 case 已注释掉，现在由 IPC 层
+//  Hooks_IPC_ISteamUser::GetEncryptedAppTicketResponse 处理。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_ETicket {
 
@@ -463,6 +480,10 @@ namespace Hooks_NetPacket_ETicket {
 
 // ════════════════════════════════════════════════════════════════
 //  Hooks_NetPacket_FamilySharing
+//
+//  中文说明：家庭共享相关消息（147 FamilyGroupsClient.NotifyRunningApps#1、
+//  9406 ClientSharedLibraryStopPlaying）。把消息体清空，
+//  避免 Steam 因为家庭共享冲突把正在玩的游戏踢掉。会改接收包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_FamilySharing {
 
@@ -486,6 +507,11 @@ namespace Hooks_NetPacket_FamilySharing {
 //  12 s for the result and patches both header (eresult=OK) and body
 //  (manifest_request_code).  On timeout or failure the original
 //  response passes through unmodified.
+//
+//  中文说明：获取清单下载码（manifest request code）。
+//  发送（151）：对 addappid 里的 depot，异步去 ManifestClient 的 HTTP 源取码；
+//  接收（147）：最多等 12 秒，拿到就把 eresult 改成 OK 并填入下载码，
+//  超时或失败就原样放行。会改接收包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Manifest {
 
@@ -703,6 +729,13 @@ namespace Hooks_NetPacket_CDKey {
 //  banner stays on the last cached state.  Cache real self-pushes and
 //  re-deliver a patched copy through oRecvPkt by borrowing the next
 //  carrier packet's data pointer.
+//
+//  中文说明：好友列表里的"正在玩"状态。
+//  发送（742/5410 GamesPlayed、7501 RichPresenceUpload）：记下正在玩的
+//    appid 和富状态键值；
+//  接收（766 PersonaState）：缓存服务器推给自己的状态，并把正在玩的
+//    游戏信息补进去，必要时借下一个收到的包注入一个伪造的 766，
+//    让自己的客户端界面显示正确。会改接收包、注入包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_RichPresence {
 
@@ -992,6 +1025,10 @@ namespace Hooks_NetPacket_RichPresence {
 //  When a game launched with -onlinefix reports appid 480, replace
 //  game_extra_info with the real game's localized name so friends
 //  see the correct title.
+//
+//  中文说明：上报正在玩的游戏（742/5410）。用 -onlinefix 启动的游戏
+//  会以 appid 480 上报，这里把 game_extra_info 改成真实游戏名，
+//  让好友看到正确的游戏名。会改发送包。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_OnlineFix {
 
@@ -1062,6 +1099,11 @@ namespace Hooks_NetPacket_OnlineFix {
 //  request (it must not reach Valve) and DELIVER the response the same way
 //  the RichPresence path injects packets: by borrowing the next inbound
 //  "carrier" packet for one oRecvPkt call (CloudRedirect's "Approach D").
+//
+//  中文说明：Steam 云存档重定向（cloud_redirect.dll）。
+//  发送（151 Cloud.*）：交给 CloudRedirect 在本地处理，处理了就
+//    拦下这个包不发给 Valve（g_SuppressSend）；
+//  接收：把 CloudRedirect 生成的 147 响应借下一个收到的包注入给 Steam。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Cloud {
 
@@ -1223,6 +1265,8 @@ namespace Hooks_NetPacket_Cloud {
 // ════════════════════════════════════════════════════════════════
 namespace {
 
+    // 发送方向的 Service Method（eMsg 151）分发：按 header 里的 target_job_name 选处理函数。
+    // 返回 true 表示处理函数已经把新的包体写进 g_SendNewBody，需要替换发送包。
     bool SendServiceJob(const char* targetJobName,
                         const uint8* pBody, uint32 cbBody,
                         const uint8* pHdr, uint32 cbHdr)
@@ -1245,9 +1289,11 @@ namespace {
 
         switch (Fnv1aHash(targetJobName)) {
 
+        // 查询成就 / 统计：把 SteamID 换成配置的统计账号
         case HASH_JOB_GetUserStats:
             return Hooks_NetPacket_UserStats::HandleSend_GetUserStats(pBody, cbBody, pHdr, cbHdr);
 
+        // 请求清单下载码：异步去 HTTP 源取码，等响应回来时替换
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
@@ -1256,6 +1302,8 @@ namespace {
         return false;
     }
 
+    // 发送方向的总分发：Steam 每发一个包都会经过这里，按 eMsg 选处理函数。
+    // 处理函数可以设置 g_NeedReplaceSend（替换包体）或 g_SuppressSend（不发出去）。
     void SendJob(EMsg eMsg, const uint8* pBody, uint32 cbBody,
                  const uint8* pHdr, uint32 cbHdr)
     {
@@ -1267,7 +1315,7 @@ namespace {
 
         switch (eMsg) {
 
-        case k_EMsgServiceMethodCallFromClient: {   // 151
+        case k_EMsgServiceMethodCallFromClient: {   // 151  Service Method 请求，交给 SendServiceJob
             CMsgProtoBufHeader hdr;
             if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_target_job_name()) {
                 g_NeedReplaceSend = SendServiceJob(hdr.target_job_name().c_str(), pBody, cbBody, pHdr, cbHdr);
@@ -1275,12 +1323,12 @@ namespace {
             return;
         }
 
-        case k_EMsgClientPICSProductInfoRequest:     // 8903
+        case k_EMsgClientPICSProductInfoRequest:     // 8903 PICS 商品信息请求：注入 access_token
             g_NeedReplaceSend = Hooks_NetPacket_AccessToken::HandleSend(pBody, cbBody);
             return;
 
-        case k_EMsgClientGamesPlayed:                 // 742
-        case k_EMsgClientGamesPlayedWithDataBlob:     // 5410
+        case k_EMsgClientGamesPlayed:                 // 742  上报正在玩的游戏
+        case k_EMsgClientGamesPlayedWithDataBlob:     // 5410 同上（带数据块）：OnlineFix 改游戏名 + 记录正在玩
             g_NeedReplaceSend = Hooks_NetPacket_OnlineFix::HandleSend(pBody, cbBody, pHdr, cbHdr);
             return;
 
@@ -1288,15 +1336,15 @@ namespace {
             Hooks_NetPacket_CDKey::HandleSend(pBody, cbBody, pHdr, cbHdr);
             return;
 
-        case k_EMsgClientRichPresenceUpload:           // 7501
+        case k_EMsgClientRichPresenceUpload:           // 7501 上传富状态：记下键值，用于注入 766（不改包）
             Hooks_NetPacket_RichPresence::TrackRPSend(pBody, cbBody);
             return;
 
-        case k_EMsgClientGetUserStats:               // 818
+        case k_EMsgClientGetUserStats:               // 818  旧版成就 / 统计请求：换 SteamID
             g_NeedReplaceSend = Hooks_NetPacket_UserStats::HandleSend_ClientGetUserStats(pBody, cbBody);
             return;
 
-        case k_EMsgClientStoreUserStats2: {         // 5466
+        case k_EMsgClientStoreUserStats2: {         // 5466 保存成就 / 统计：通知 CloudRedirect（不改包）
             AppId_t appId = Hooks_NetPacket_RichPresence::g_PlayingAppId;
             if (appId != 0)
                 CloudRedirectHost::NotifyStatsStored(appId);
@@ -1308,6 +1356,7 @@ namespace {
         }
     }
 
+    // 接收方向的 Service Method 响应（eMsg 147）分发：按 header 里的 target_job_name 选处理函数。
     void RecvServiceJob(const char* targetJobName,
                         const uint8* pBody, uint32 cbBody,
                         const uint8* pHdr, uint32 cbHdr)
@@ -1318,14 +1367,17 @@ namespace {
 
         switch (Fnv1aHash(targetJobName)) {
 
+        // 家庭共享正在运行的游戏通知：清空消息体
         case HASH_JOB_NotifyRunningApps:
             Hooks_NetPacket_FamilySharing::ClearBody(pBody, cbBody);
             return;
 
+        // 成就 / 统计响应：eresult 改成 OK，清掉借来的统计数据
         case HASH_JOB_GetUserStats:
             Hooks_NetPacket_UserStats::HandleRecv_GetUserStatsResponse(pHdr, cbHdr, pBody, cbBody);
             return;
 
+        // 清单下载码响应：填入从 HTTP 源拿到的下载码
         case HASH_JOB_GetManifestRequestCode:
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
@@ -1334,12 +1386,15 @@ namespace {
         }
     }
 
+    // 接收方向的总分发：Steam 每收到一个包都会经过这里，按 eMsg 选处理函数。
+    // 处理函数通过 g_NeedReplaceBody / g_NeedReplaceHdr 决定是否替换包体和 header。
     void RecvJob(EMsg eMsg, const uint8* pBody, uint32 cbBody,
                  const uint8* pHdr, uint32 cbHdr)
     {
         g_NeedReplaceBody = false;
         g_NeedReplaceHdr  = false;
 
+        // k_EMsgMulti 是把多个包打包压缩在一起的容器，里面的包会单独再经过这里，这里直接跳过。
         if(eMsg == k_EMsgMulti) {
             LOG_NETPACKET_TRACE("Received k_EMsgMulti, skipping dispatch");
             return;
@@ -1349,7 +1404,7 @@ namespace {
 
         switch (eMsg) {
 
-        case k_EMsgServiceMethodResponse: {     // 147
+        case k_EMsgServiceMethodResponse: {     // 147  Service Method 响应，交给 RecvServiceJob
             CMsgProtoBufHeader hdr;
             if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_target_job_name())
                 RecvServiceJob(hdr.target_job_name().c_str(), pBody, cbBody, pHdr, cbHdr);
@@ -1357,11 +1412,12 @@ namespace {
         }
 
         // migrated to IPC Layer Hooks_IPC_ISteamUser::GetEncryptedAppTicketResponse
+        // （已迁移到 IPC 层处理，这里不再拦截 5527）
         // case k_EMsgClientRequestEncryptedAppTicketResponse:     // 5527
         //     Hooks_NetPacket_ETicket::HandleEncryptedAppTicketResponse(pBody, cbBody);
         //     return;
 
-        case k_EMsgClientGetUserStatsResponse:     // 819
+        case k_EMsgClientGetUserStatsResponse:     // 819  旧版成就 / 统计响应：eresult 改 OK，叠加 CloudRedirect 成就
             g_NeedReplaceBody = Hooks_NetPacket_UserStats::HandleRecv_ClientGetUserStatsResponse(
                 pBody, cbBody);
             return;
@@ -1370,11 +1426,11 @@ namespace {
             Hooks_NetPacket_CDKey::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
-        case k_EMsgClientSharedLibraryStopPlaying:     // 9406
+        case k_EMsgClientSharedLibraryStopPlaying:     // 9406 家庭共享"停止游戏"通知：清空消息体
             Hooks_NetPacket_FamilySharing::ClearBody(pBody, cbBody);
             return;
 
-        case k_EMsgClientPersonaState:                 // 766
+        case k_EMsgClientPersonaState:                 // 766  好友状态推送：补上正在玩的游戏信息
             g_NeedReplaceBody = Hooks_NetPacket_RichPresence::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
@@ -1387,6 +1443,12 @@ namespace {
     //  Hooks
     // ════════════════════════════════════════════════════════════
 
+    // 发送 hook：Steam 通过 WebSocket 给 CM 服务器发每一帧之前都会调用。
+    // 流程：拆包（eMsg + header + body）→ SendJob 分发 →
+    //   g_SuppressSend  为 true：不发出去，直接返回成功（CloudRedirect 已在本地处理）；
+    //   g_NeedReplaceSend 为 true：用 g_SendNewBody 重新组包再发；
+    //   否则原样发送。
+    // 非二进制帧（比如文本、ping）直接放行。
     HOOK_FUNC(BBuildAndAsyncSendFrame, bool,
               void* pObject, EWebSocketOpCode eWebSocketOpCode,
               uint8* pubData, uint32 cubData)
@@ -1424,6 +1486,12 @@ namespace {
         return result;
     }
 
+    // 接收 hook：Steam 每收到 CM 服务器的一个包都会调用，交给 Steam 处理之前先经过这里。
+    // 流程：
+    //   1. 先借这个包注入待发的伪造包（RichPresence 的 766、Cloud 的 147 响应）；
+    //   2. 拆包 → RecvJob 分发；
+    //   3. 处理函数要求替换时，把新的 header / body 写回这个包；
+    //   4. 最后交给原函数 oRecvPkt，让 Steam 继续处理。
     HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
     {
         Hooks_NetPacket_RichPresence::TryInject(
@@ -1464,6 +1532,7 @@ namespace {
 } // anonymous namespace
 
 
+// 安装 / 卸载上面两个 hook（Detours），由 DLL 初始化和退出时调用。
 namespace Hooks_NetPacket {
     void Install() {
         RESOLVE_C(PchMsgNameFromEMsg);
