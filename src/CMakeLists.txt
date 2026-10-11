@@ -110,7 +110,7 @@ add_library(OpenSteamTool SHARED
     Utils/CloudRedirect/CloudRedirectHost.cpp
     Utils/HookSupport/VehCommon.cpp
     Utils/Logging/Log.cpp
-    Utils/SteamMetadata/ExampleClient.cpp
+    Utils/SteamMetadata/CDKeyReporter.cpp
     Utils/SteamMetadata/IPCLoader.cpp
     Utils/SteamMetadata/ManifestClient.cpp
     Utils/SteamMetadata/PatternLoader.cpp

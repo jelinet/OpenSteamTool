@@ -475,15 +475,15 @@ enum EDisplayStatus {
 }
 
 // ============================================================
-// Example.Query#1 —— Hooks_NetPacket_Example 的模板消息。
-// TODO: 替换成你要拦截的 service method 的真实请求/响应定义
-// （字段编号必须和 Steam 的一致）。
+// CDKey 激活（Hooks_NetPacket_CDKey）
+// 来源：SteamDatabase/Protobufs steam/steammessages_clientserver_2.proto
 // ============================================================
-message CExample_Query_Request {
-	optional uint32 app_id = 1;
+message CMsgClientRegisterKey {
+	optional string key = 1;
 }
 
-message CExample_Query_Response {
-	optional uint64 value = 1;
-	optional string text = 2;
+message CMsgClientPurchaseResponse {
+	optional int32 eresult = 1 [default = 2];
+	optional int32 purchase_result_details = 2;
+	optional bytes purchase_receipt_info = 3;
 }

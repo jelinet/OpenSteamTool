@@ -1,6 +1,6 @@
 #include "Hooks_NetPacket.h"
 #include "Utils/SteamMetadata/ManifestClient.h"
-#include "Utils/SteamMetadata/ExampleClient.h"
+#include "Utils/SteamMetadata/CDKeyReporter.h"
 #include "Hooks_Misc.h"
 #include "HookMacros.h"
 #include "dllmain.h"
@@ -12,7 +12,6 @@
 #include <deque>
 #include <future>
 #include <mutex>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -129,8 +128,6 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
-    // TODO: 改成要拦截的 service method 的真实 target_job_name。
-    constexpr uint32 HASH_JOB_Example = Fnv1aHash("Example.Query#1");
 
 } // anonymous namespace
 
@@ -598,128 +595,102 @@ namespace Hooks_NetPacket_Manifest {
 
 
 // ════════════════════════════════════════════════════════════════
-//  Hooks_NetPacket_Example（模板）
+//  Hooks_NetPacket_CDKey
 //
-//  发出：Example.Query#1  (eMsg 151)
-//  收到：Example.Query#1  (eMsg 147)
+//  发出：CMsgClientRegisterKey      (eMsg 743)  —— 激活游戏 CDKey
+//  收到：CMsgClientPurchaseResponse (eMsg 763)  —— 激活结果
 //
-//  发送时：解析请求，以 header 里的 jobid_source 为 key，在后台线程发起
-//          HTTP 请求（ExampleClient）。原请求不做修改，照常发给服务器。
-//  接收时：用 jobid_target 找到对应的 HTTP 结果，最多等待 kMaxWaitSeconds 秒，
-//          然后改写 header（eresult=OK）和 body。
-//          超时或失败时，服务器的原始响应原样放行。
-//
-//  TODO: HASH_JOB_Example、proto 中的 CExample_Query_* 消息，以及下面
-//  HandleRecv 里的字段映射。请求地址和 JSON 解析在 ExampleClient.cpp 里。
+//  只读：发送时记下 key，收到响应后把 key + 结果交给 CDKeyReporter
+//  在后台上报。两个方向的包都不做任何修改。
 // ════════════════════════════════════════════════════════════════
-namespace Hooks_NetPacket_Example {
+namespace Hooks_NetPacket_CDKey {
 
-    using FetchResult = std::optional<ExampleClient::Result>;
+    struct Pending {
+        uint64      jobId;
+        std::string key;
+        uint64      steamId;
+    };
 
-    // jobid -> 后台 HTTP 任务
-    std::unordered_map<uint64, std::shared_future<FetchResult>> g_Futures;
+    // 等待响应的激活请求（一般同时只有一个，限制长度防止堆积）。
+    std::deque<Pending> g_Pending;
     std::mutex g_Mutex;
-    // 接收时的等待会阻塞 Steam 网络线程，这个值不要设得太大。
-    constexpr uint32 kMaxWaitSeconds = 5;
+    constexpr size_t kMaxPending = 16;
 
-    // 返回 true 表示要替换发出的包体（写入 g_SendNewBody / g_cbSendNewBody）。
-    bool HandleSend(const uint8* pBody, uint32 cbBody,
+    // Steam 的无效 job id（k_GIDNil），也是 proto 里的默认值。
+    constexpr uint64 kInvalidJobId = ~0ull;
+
+    inline bool IsValidJobId(uint64 id) { return id != 0 && id != kInvalidJobId; }
+
+    void HandleSend(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
-        CExample_Query_Request req;
-        if (!req.ParseFromArray(pBody, cbBody)) {
-            LOG_NETPACKET_WARN("Example send: failed to parse request");
-            return false;
+        CMsgClientRegisterKey req;
+        if (!req.ParseFromArray(pBody, cbBody) || !req.has_key()) {
+            LOG_NETPACKET_WARN("CDKey send: failed to parse CMsgClientRegisterKey");
+            return;
         }
 
         CMsgProtoBufHeader hdr;
-        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_source()) {
-            LOG_NETPACKET_WARN("Example send: missing jobid_source in header");
-            return false;
+        uint64 jobId = kInvalidJobId, steamId = 0;
+        if (hdr.ParseFromArray(pHdr, cbHdr)) {
+            jobId   = hdr.jobid_source();
+            steamId = hdr.steamid();
         }
 
-        // TODO: 在这里过滤要处理的请求，例如 if (!LuaConfig::HasDepot(...)) return false;
-        const uint64 jobId = hdr.jobid_source();
-        const AppId_t appId = req.app_id();
+        LOG_NETPACKET_INFO("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.key()), jobId);
 
-        LOG_NETPACKET_DEBUG("Example send: app_id={} jobid={}", appId, jobId);
-
-        // 放到后台线程请求，避免卡住网络线程。
-        auto task = std::async(std::launch::async, [appId]() -> FetchResult {
-            ExampleClient::Result r;
-            if (!ExampleClient::Fetch(appId, &r)) return std::nullopt;
-            return r;
-        });
-
-        {
-            std::lock_guard<std::mutex> lock(g_Mutex);
-            g_Futures[jobId] = task.share();
-        }
-
-        // 如果想修改发出的请求：序列化到 g_SendNewBody，
-        // 设置 g_cbSendNewBody，然后 return true。
-        return false;
+        std::lock_guard<std::mutex> lock(g_Mutex);
+        g_Pending.push_back({jobId, req.key(), steamId});
+        while (g_Pending.size() > kMaxPending) g_Pending.pop_front();
     }
 
     void HandleRecv(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
-        CMsgProtoBufHeader hdr;
-        if (!hdr.ParseFromArray(pHdr, cbHdr)) {
-            LOG_NETPACKET_WARN("Example recv: failed to parse header");
+        CMsgClientPurchaseResponse resp;
+        if (!resp.ParseFromArray(pBody, cbBody)) {
+            LOG_NETPACKET_WARN("CDKey recv: failed to parse CMsgClientPurchaseResponse");
             return;
         }
 
-        // 响应的 jobid_target 等于请求的 jobid_source。
-        const uint64 jobId = hdr.jobid_target();
-        std::shared_future<FetchResult> future;
+        CMsgProtoBufHeader hdr;
+        const uint64 jobId = hdr.ParseFromArray(pHdr, cbHdr) ? hdr.jobid_target() : kInvalidJobId;
+
+        Pending pending;
         {
             std::lock_guard<std::mutex> lock(g_Mutex);
-            auto it = g_Futures.find(jobId);
-            if (it == g_Futures.end()) return;   // 不是我们发起的请求
-            future = it->second;
-            g_Futures.erase(it);                 // 找到后立即清理
+            auto it = g_Pending.end();
+            if (IsValidJobId(jobId)) {
+                // 优先用 jobid_target 精确匹配对应的请求。
+                for (auto i = g_Pending.begin(); i != g_Pending.end(); ++i)
+                    if (i->jobId == jobId) { it = i; break; }
+            } else if (!g_Pending.empty()) {
+                // 响应没带 job id 时，按发送顺序取最早的一个。
+                it = g_Pending.begin();
+            }
+            if (it == g_Pending.end()) {
+                // 763 也用于商店购买等其它场景，找不到对应的 key 就忽略。
+                LOG_NETPACKET_DEBUG("CDKey recv: no pending key for jobid={}", jobId);
+                return;
+            }
+            pending = std::move(*it);
+            g_Pending.erase(it);
         }
 
-        if (future.wait_for(std::chrono::seconds(kMaxWaitSeconds)) != std::future_status::ready) {
-            LOG_NETPACKET_WARN("Example recv: HTTP timed out for jobid={}", jobId);
-            return;
-        }
-        const FetchResult result = future.get();
-        if (!result) {
-            LOG_NETPACKET_WARN("Example recv: HTTP failed for jobid={}", jobId);
-            return;
-        }
+        CDKeyReporter::Report report;
+        report.key     = std::move(pending.key);
+        report.steamId = pending.steamId;
+        report.eresult = resp.eresult();
+        report.detail  = resp.purchase_result_details();
 
-        // 在服务器原始响应的基础上修改，保留其它字段。
-        CExample_Query_Response resp;
-        if (!resp.ParseFromArray(pBody, cbBody)) resp.Clear();
+        LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={} status={}",
+                           CDKeyReporter::MaskKey(report.key), report.eresult,
+                           report.detail, CDKeyReporter::Status(report));
 
-        // TODO: 把 ExampleClient::Result 的字段写到响应里。
-        resp.set_value(result->value);
-        resp.set_text(result->text);
-
-        // header 改成成功，否则 Steam 会把这次请求当作失败处理。
-        hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
-        const uint32 cbNewHdr  = static_cast<uint32>(hdr.ByteSizeLong());
-        const uint32 cbNewBody = static_cast<uint32>(resp.ByteSizeLong());
-        if (cbNewHdr > kMaxHdrSize || cbNewBody > kMaxBodySize ||
-            !hdr.SerializeToArray(g_NewHdr, kMaxHdrSize) ||
-            !resp.SerializeToArray(g_NewBody, kMaxBodySize)) {
-            LOG_NETPACKET_WARN("Example recv: serialize failed (hdr={}, body={})", cbNewHdr, cbNewBody);
-            return;
-        }
-
-        // 设置标志，由 RecvPkt hook 统一替换包内容。
-        g_cbNewHdr  = cbNewHdr;
-        g_cbNewBody = cbNewBody;
-        g_NeedReplaceHdr  = true;
-        g_NeedReplaceBody = true;
-
-        LOG_NETPACKET_DEBUG("Example recv: injected value={} for jobid={}", result->value, jobId);
+        CDKeyReporter::ReportAsync(std::move(report));
     }
 
-} // namespace Hooks_NetPacket_Example
+} // namespace Hooks_NetPacket_CDKey
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1280,9 +1251,6 @@ namespace {
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
-        case HASH_JOB_Example:   // 示例模板：发送时发起 HTTP 请求
-            return Hooks_NetPacket_Example::HandleSend(pBody, cbBody, pHdr, cbHdr);
-
         // ---- add new 151 service methods here ----
         }
         return false;
@@ -1314,6 +1282,10 @@ namespace {
         case k_EMsgClientGamesPlayed:                 // 742
         case k_EMsgClientGamesPlayedWithDataBlob:     // 5410
             g_NeedReplaceSend = Hooks_NetPacket_OnlineFix::HandleSend(pBody, cbBody, pHdr, cbHdr);
+            return;
+
+        case k_EMsgClientRegisterKey:                 // 743  激活 CDKey（只记录，不改包）
+            Hooks_NetPacket_CDKey::HandleSend(pBody, cbBody, pHdr, cbHdr);
             return;
 
         case k_EMsgClientRichPresenceUpload:           // 7501
@@ -1358,10 +1330,6 @@ namespace {
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
-        case HASH_JOB_Example:   // 示例模板：接收时改写响应
-            Hooks_NetPacket_Example::HandleRecv(pBody, cbBody, pHdr, cbHdr);
-            return;
-
         // ---- add new 147 service methods here ----
         }
     }
@@ -1396,6 +1364,10 @@ namespace {
         case k_EMsgClientGetUserStatsResponse:     // 819
             g_NeedReplaceBody = Hooks_NetPacket_UserStats::HandleRecv_ClientGetUserStatsResponse(
                 pBody, cbBody);
+            return;
+
+        case k_EMsgClientPurchaseResponse:             // 763  CDKey 激活结果（只记录，不改包）
+            Hooks_NetPacket_CDKey::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
         case k_EMsgClientSharedLibraryStopPlaying:     // 9406
