@@ -249,17 +249,44 @@ namespace Hooks_NetPacket_AccessToken {
 //    统计账号（GetStatSteamId），818 还会强制重新下载 schema。
 //  接收（147、819）：把 eresult 改成 OK，清掉借来的统计数据，
 //    819 还会叠加 CloudRedirect 同步的成就。会改发送包和接收包。
+//
+//  背景：游戏的成就 / 统计分两部分：
+//    - schema：这个游戏有哪些成就、哪些统计项（名字、图标等），所有人一样；
+//    - stats：某个账号自己的进度和解锁时间。
+//  对没拥有的游戏（addappid 加进来的），用自己的 SteamID 去查，服务器会返回失败，
+//  Steam 拿不到 schema，成就功能就用不了。
+//  做法：发送时把查询的 SteamID 换成一个拥有这个游戏的"统计账号"（下面叫借用账号），
+//  让服务器正常返回 schema；接收时把 eresult 改成 OK，并把借用账号自己的
+//  进度清掉，只留 schema，这样你看到的是自己的进度，而不是别人的。
+//
+//  借用账号的 SteamID 来自 LuaConfig::GetStatSteamId，优先级：
+//    Lua 里的 setStat(appid, "steamid") > stats API（[stats] enable_api）> 内置默认 SteamID。
+//
+//  Steam 有新旧两套接口，所以有两对处理函数：
+//    新：151 Player.GetUserStats#1  -> 147 响应（HandleSend_GetUserStats / HandleRecv_GetUserStatsResponse）
+//    旧：818 ClientGetUserStats     -> 819 响应（HandleSend_ClientGetUserStats / HandleRecv_ClientGetUserStatsResponse）
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_UserStats {
 
     // jobid_source -> appid mapping (eMsg 151 request -> eMsg 147 response)
+    // 147 响应的 body 里不一定带 appid，所以发送时按 jobid 记下 appid，
+    // 收到响应时用 jobid_target 查回来，判断是不是 addappid 里的游戏。
+    // 只在 Steam 网络线程里访问，所以没有加锁。
     std::unordered_map<uint64, AppId_t> g_JobIdToAppId;
 
     // ── Send: CPlayer_GetUserStats_Request (eMsg 151) ──────────
+    // 新接口的请求。步骤：
+    //   1. 解析请求，没有 appid 就不处理；
+    //   2. 请求带了 sha_schema 时不改（原代码的判断，日志写的是 "do not spoof"）；
+    //      不在 addappid 里的游戏也不改；
+    //   3. 记下 jobid_source -> appid，给 147 响应用；
+    //   4. 把 steamid 换成借用账号；
+    //   5. 序列化到 g_SendNewBody，返回 true 让发送 hook 替换包体。
     bool HandleSend_GetUserStats(const uint8* pBody, uint32 cbBody,
                                  const uint8* pHdr, uint32 cbHdr)
     {
 
+        // 步骤 1：解析请求
         CPlayer_GetUserStats_Request req;
         if (!req.ParseFromArray(pBody, cbBody)) {
             LOG_ACHIEVEMENT_WARN("Player::GetUserStats request: failed to ParseFromArray");
@@ -272,6 +299,7 @@ namespace Hooks_NetPacket_UserStats {
 
         LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: original body:\n{}", req.DebugString());
         
+        // 步骤 2：判断要不要改
         AppId_t appId = req.appid();
         bool hasShaSchema = req.has_sha_schema() && !req.sha_schema().empty();
 
@@ -285,6 +313,7 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // Save jobid_source -> appid for the response handler
+        // 步骤 3：记下 jobid -> appid
         CMsgProtoBufHeader hdr;
         if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_jobid_source()) {
             uint64 jobId = hdr.jobid_source();
@@ -292,8 +321,11 @@ namespace Hooks_NetPacket_UserStats {
             LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats request: stored jobid={} -> appid={}", jobId, appId);
         }
 
+        // 步骤 4：换成借用账号的 SteamID
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steamid(newSteamId);
+
+        // 步骤 5：序列化到发送替换缓冲
 
         g_cbSendNewBody = static_cast<uint32>(req.ByteSizeLong());
         if (!req.SerializeToArray(g_SendNewBody, kMaxBodySize)) {
@@ -307,6 +339,15 @@ namespace Hooks_NetPacket_UserStats {
 
     // ── Recv: CPlayer_GetUserStats_Response (eMsg 147) ─────────
     //     Header: set eresult=OK.  Body: strip stats (field 4).
+    // 新接口的响应。步骤：
+    //   1. 解析 header，用 jobid_target 查回发送时记下的 appid（查到后删掉这条记录）；
+    //   2. header：eresult 改成 OK，写到 g_NewHdr，设置 g_NeedReplaceHdr；
+    //   3. body：只对查到 appid 且在 addappid 里的游戏，清掉 stats（借用账号的进度），
+    //      保留 schema。
+    //      清掉字段后 body 只会变小，所以直接写回原来的 body 缓冲（就地缩小），
+    //      新长度放 g_NewBodySize，设置 g_ResizedInPlace；
+    //      RecvPkt 看到它后会调整包长度（header 也换了时用 ReplaceRecvPacket 重新拼包）。
+    // 注意：header 的 eresult 不管 appid 有没有查到都会改成 OK。
     void HandleRecv_GetUserStatsResponse(const uint8* pHdr, uint32 cbHdr,
                                     const uint8* pBody, uint32 cbBody)
     {
@@ -319,6 +360,7 @@ namespace Hooks_NetPacket_UserStats {
         LOG_ACHIEVEMENT_DEBUG("Player::GetUserStats response: original header:\n{}", hdrMsg.DebugString());
 
         // Look up appid via jobid_target -> jobid_source match
+        // 步骤 1：按 jobid 查回 appid
         AppId_t appId = 0;
         bool hasAppId = false;
         if (hdrMsg.has_jobid_target()) {
@@ -332,6 +374,7 @@ namespace Hooks_NetPacket_UserStats {
             }
         }
 
+        // 步骤 2：header 的 eresult 改成 OK
         hdrMsg.set_eresult(static_cast<int32_t>(k_EResultOK));
         g_cbNewHdr = static_cast<uint32>(hdrMsg.ByteSizeLong());
         if (g_cbNewHdr > kMaxHdrSize || !hdrMsg.SerializeToArray(g_NewHdr, kMaxHdrSize))
@@ -340,6 +383,7 @@ namespace Hooks_NetPacket_UserStats {
         g_NeedReplaceHdr = true;
 
         // Body: strip stats (only if appid was matched and is in our config)
+        // 步骤 3：清掉借用账号的进度，就地写回 body
         CPlayer_GetUserStats_Response resp;
         if (!resp.ParseFromArray(pBody, cbBody)){
             LOG_ACHIEVEMENT_WARN("Player::GetUserStats response: failed to ParseFromArray original response");
@@ -353,6 +397,7 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         resp.clear_stats();
+        // 写回原 body 缓冲（const_cast：缓冲属于 Steam 的接收包，变小不会越界）
         g_NewBodySize = static_cast<uint32>(resp.ByteSizeLong());
         if (!resp.SerializeToArray(const_cast<uint8*>(pBody), cbBody)){
             LOG_ACHIEVEMENT_WARN("Player::GetUserStats response: failed to SerializeToArray modified response");
@@ -364,6 +409,13 @@ namespace Hooks_NetPacket_UserStats {
     }
 
     // ── Send: CMsgClientGetUserStats (eMsg 818) ────────────────
+    // 旧接口的请求。步骤：
+    //   1. 解析请求，game_id 的低 32 位就是 appid，不在 addappid 里就不改；
+    //   2. schema_local_version 设成 -1，告诉服务器"本地没有 schema"，
+    //      强制它把完整 schema 发回来；
+    //   3. steam_id_for_user 换成借用账号；
+    //   4. 序列化到 g_SendNewBody，返回 true 让发送 hook 替换包体。
+    // 旧接口的响应里自带 game_id，所以不需要像 151 那样记 jobid。
     bool HandleSend_ClientGetUserStats(const uint8* pBody, uint32 cbBody)
     {
         CMsgClientGetUserStats req;
@@ -382,13 +434,17 @@ namespace Hooks_NetPacket_UserStats {
             LOG_ACHIEVEMENT_WARN("ClientGetUserStats request: appid={} is not in addappid", appId);
             return false;
         }
+        // 步骤 2：强制重新下载 schema
         if (req.schema_local_version() != -1) {
             req.set_schema_local_version(-1);
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats request: forced schema_local_version to -1");
         }
 
+        // 步骤 3：换成借用账号的 SteamID
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steam_id_for_user(newSteamId);
+
+        // 步骤 4：序列化到发送替换缓冲
 
         g_cbSendNewBody = static_cast<uint32>(req.ByteSizeLong());
         if (!req.SerializeToArray(g_SendNewBody, kMaxBodySize)) {
@@ -402,6 +458,14 @@ namespace Hooks_NetPacket_UserStats {
 
     // ── Recv: CMsgClientGetUserStatsResponse (eMsg 819) ────────
     //     Clear donor stats, overlay CR achievements, patch eresult->OK.
+    // 旧接口的响应。步骤：
+    //   1. 解析 body，按 game_id 判断是不是 addappid 里的游戏，不是就不改；
+    //   2. 清掉借用账号的 stats 和 achievement_blocks（进度和解锁时间），
+    //      eresult 改成 OK（旧接口的 eresult 在 body 里，不在 header 里）；
+    //   3. 从 CloudRedirect 取你自己云同步的成就（最多 64 块），每块写成
+    //      一个 stat（32 位的解锁标志位）和一个 achievement_block（32 个解锁时间），
+    //      并按同样方式算出 crc_stats；没有数据就保持清空，相当于全部未解锁；
+    //   4. 序列化到 g_NewBody，设置 g_NeedReplaceBody，替换整个 body。
     bool HandleRecv_ClientGetUserStatsResponse(const uint8* pBody, uint32 cbBody)
     {
         CMsgClientGetUserStatsResponse resp;
@@ -412,11 +476,13 @@ namespace Hooks_NetPacket_UserStats {
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats response: no modification needed");
             return false;
         }
+        // 步骤 2：清掉借用账号的进度，eresult 改 OK
         resp.clear_stats();
         resp.clear_achievement_blocks();
         resp.set_eresult(1);  // k_EResultOK
 
         // Overlay CR's cloud-synced achievement state
+        // 步骤 3：叠加 CloudRedirect 里你自己的成就
         const auto appId = static_cast<uint32_t>(resp.game_id());
         CloudRedirectHost::AchievementBlock blocks[64];
         uint32_t n = CloudRedirectHost::GetAchievements(appId, blocks, 64);
@@ -438,6 +504,7 @@ namespace Hooks_NetPacket_UserStats {
             LOG_ACHIEVEMENT_DEBUG("ClientGetUserStats response: cleared stats/achievements (no CR data for app {})", appId);
         }
 
+        // 步骤 4：序列化到接收替换缓冲
         auto newSize = resp.ByteSizeLong();
         if (newSize > sizeof(g_NewBody)) {
             LOG_ACHIEVEMENT_WARN("ClientGetUserStats response: modified message too large ({} bytes)", newSize);
