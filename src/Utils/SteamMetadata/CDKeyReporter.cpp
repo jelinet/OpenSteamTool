@@ -1,11 +1,9 @@
 #include "CDKeyReporter.h"
 
 #include "OSTPlatform/include/Http.h"
-#include "OSTPlatform/include/Thread.h"
 #include "Utils/Logging/Log.h"
 
 #include <cstdio>
-#include <utility>
 
 namespace CDKeyReporter {
 namespace {
@@ -15,6 +13,10 @@ namespace {
 
     // TODO: 需要的话加上鉴权等请求头，每行以 \r\n 结尾。
     constexpr const wchar_t* kHeaders = L"Content-Type: application/json\r\n";
+
+    // TODO: 超时（毫秒）。同步上报会让 Steam 网络线程停下来等，
+    // 解析 / 连接 / 发送 / 接收各用这个值，最坏情况约 4 倍。不要设太大。
+    constexpr uint32_t kTimeoutMs = 2000;
 
     // EPurchaseResultDetail 中和 CDKey 激活相关的常见值
     // （完整列表见 SteamKit 的 enums.steamd）。
@@ -86,25 +88,21 @@ std::string MaskKey(const std::string& key) {
     return std::string(key.size() - kVisible, '*') + key.substr(key.size() - kVisible);
 }
 
-void ReportAsync(Report r) {
-    // 不能用 std::async 直接丢弃返回值：future 析构时会阻塞等待，
-    // 等于在网络线程里同步发请求。这里用分离线程。
-    const bool started = OSTPlatform::Thread::StartDetached([r = std::move(r)]() -> uint32_t {
-        const std::string body = BuildJson(r);
-        auto res = OSTPlatform::Http::Execute(L"POST", kReportUrl,
-                                              body.data(), static_cast<uint32_t>(body.size()),
-                                              kHeaders);
-        if (!res.ok || res.status < 200 || res.status >= 300) {
-            LOG_NETPACKET_WARN("CDKey report failed key={} status={} ok={}",
-                               MaskKey(r.key), res.status, res.ok);
-            return 1;
-        }
-        LOG_NETPACKET_INFO("CDKey report sent key={} status={}", MaskKey(r.key), Status(r));
-        return 0;
-    });
-    if (!started) {
-        LOG_NETPACKET_WARN("CDKey report: failed to start worker thread");
+bool SendReport(const Report& r) {
+    // 同步上报：在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
+    const std::string body = BuildJson(r);
+    auto res = OSTPlatform::Http::Execute(L"POST", kReportUrl,
+                                          body.data(), static_cast<uint32_t>(body.size()),
+                                          kHeaders,
+                                          kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+    if (!res.ok || res.status < 200 || res.status >= 300) {
+        // 失败只写日志，不重试，不影响 Steam 的激活流程。
+        LOG_NETPACKET_WARN("CDKey report failed key={} status={} ok={}",
+                           MaskKey(r.key), res.status, res.ok);
+        return false;
     }
+    LOG_NETPACKET_INFO("CDKey report sent key={} status={}", MaskKey(r.key), Status(r));
+    return true;
 }
 
 } // namespace CDKeyReporter

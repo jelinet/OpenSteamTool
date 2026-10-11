@@ -601,7 +601,7 @@ namespace Hooks_NetPacket_Manifest {
 //  收到：CMsgClientPurchaseResponse (eMsg 763)  —— 激活结果
 //
 //  只读：发送时记下 key，收到响应后把 key + 结果交给 CDKeyReporter
-//  在后台上报。两个方向的包都不做任何修改。
+//  同步上报。两个方向的包都不做任何修改。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_CDKey {
 
@@ -687,7 +687,7 @@ namespace Hooks_NetPacket_CDKey {
                            CDKeyReporter::MaskKey(report.key), report.eresult,
                            report.detail, CDKeyReporter::Status(report));
 
-        CDKeyReporter::ReportAsync(std::move(report));
+        CDKeyReporter::SendReport(report);   // 同步上报，失败只写日志
     }
 
 } // namespace Hooks_NetPacket_CDKey

@@ -20,8 +20,9 @@ namespace CDKeyReporter {
     // 把结果归类成一个简短的状态字符串，例如 "activated"、"used_by_other_account"。
     const char* Status(const Report& r);
 
-    // 在后台线程发送，不阻塞调用方（Steam 网络线程）。
-    void ReportAsync(Report r);
+    // 同步发送：会阻塞调用方（Steam 网络线程）直到请求完成或超时。
+    // 成功（HTTP 2xx）返回 true；失败只写日志，返回 false。
+    bool SendReport(const Report& r);
 
     // 日志用：只显示 key 的最后 5 位。
     std::string MaskKey(const std::string& key);
