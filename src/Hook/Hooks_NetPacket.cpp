@@ -189,7 +189,7 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");      // 家庭共享：正在运行的游戏通知
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");                            // 成就 / 统计数据
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");  // 清单下载码
-
+    constexpr uint32 Hooks_NetPacket_CDKey = Fnv1aHash("Store.RegisterCDKey#1");
 } // anonymous namespace
 
 
@@ -892,7 +892,7 @@ namespace Hooks_NetPacket_CDKey {
         mhdr->headerLength = cbRespHdr;
         if (!respHdr.SerializeToArray(pkt.data() + sizeof(MsgHdr), cbRespHdr) ||
             !resp.SerializeToArray(pkt.data() + sizeof(MsgHdr) + cbRespHdr, cbRespBody)) {
-            LOG_NETPACKET_WARN("CDKey: failed to build fail response");
+            LOG_REGISTERCDKEY_DEBUG("CDKey: failed to build fail response");
             return;
         }
 
@@ -925,7 +925,7 @@ namespace Hooks_NetPacket_CDKey {
             invokeOriginal(pThis, pCarrier);
             pCarrier->m_pubData = origData;
             pCarrier->m_cubData = origSize;
-            LOG_NETPACKET_INFO("CDKey: delivered local fail response ({} bytes)", pkt.size());
+            LOG_REGISTERCDKEY_DEBUG("CDKey: delivered local fail response ({} bytes)", pkt.size());
         }
     }
 
@@ -944,8 +944,9 @@ namespace Hooks_NetPacket_CDKey {
     {
         // 步骤 1：解析请求 body，取 key
         CMsgClientRegisterKey req;
+        LOG_REGISTERCDKEY_DEBUG("CDKey send: parsing CMsgClientRegisterKey...");
         if (!req.ParseFromArray(pBody, cbBody) || !req.has_key()) {
-            LOG_NETPACKET_WARN("CDKey send: failed to parse CMsgClientRegisterKey");
+            LOG_REGISTERCDKEY_DEBUG("CDKey send: failed to parse CMsgClientRegisterKey");
             return true; // 拦下不发给 Steam，避免激活失败界面显示"未知错误"
         }
 
@@ -959,7 +960,7 @@ namespace Hooks_NetPacket_CDKey {
         }
 
         // 步骤 3：写日志（key 掩码）
-        LOG_NETPACKET_INFO("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.key()), jobId);
+        LOG_REGISTERCDKEY_DEBUG("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.key()), jobId);
 
         // 步骤 4：同步校验机器码
         const CDKeyReporter::CheckResponse check =
@@ -967,7 +968,7 @@ namespace Hooks_NetPacket_CDKey {
 
         // 步骤 5：拒绝 → 拦下 743，本地回失败的 763
         if (!check.allow) {
-            LOG_NETPACKET_WARN("CDKey send: blocked key={} detail={}",
+            LOG_REGISTERCDKEY_DEBUG("CDKey send: blocked key={} detail={}",
                                CDKeyReporter::MaskKey(req.key()), check.detail);
             QueueFailResponse(hdrOk ? &hdr : nullptr, check.detail);
             return true;
@@ -999,7 +1000,7 @@ namespace Hooks_NetPacket_CDKey {
         // 步骤 1：解析响应 body
         CMsgClientPurchaseResponse resp;
         if (!resp.ParseFromArray(pBody, cbBody)) {
-            LOG_NETPACKET_WARN("CDKey recv: failed to parse CMsgClientPurchaseResponse");
+            LOG_REGISTERCDKEY_DEBUG("CDKey recv: failed to parse CMsgClientPurchaseResponse");
             return;
         }
 
@@ -1023,7 +1024,7 @@ namespace Hooks_NetPacket_CDKey {
             }
             if (it == g_Pending.end()) {
                 // 763 也用于商店购买等其它场景，找不到对应的 key 就忽略。
-                LOG_NETPACKET_DEBUG("CDKey recv: no pending key for jobid={}", jobId);
+                LOG_REGISTERCDKEY_DEBUG("CDKey recv: no pending key for jobid={}", jobId);
                 return;
             }
             pending = std::move(*it);
@@ -1046,11 +1047,11 @@ namespace Hooks_NetPacket_CDKey {
         // }
 
         // 步骤 5：写日志（debug 级别打出 Steam 响应的完整 header 和 body）
-        LOG_NETPACKET_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
-        LOG_NETPACKET_DEBUG("CDKey recv raw body:\n{}", resp.DebugString());
-        LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={}",
-                           CDKeyReporter::MaskKey(pending.key), resp.eresult(),
-                           resp.purchase_result_details());
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv raw body:\n{}", resp.DebugString());
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: key={} eresult={} detail={} status={}",
+                           CDKeyReporter::MaskKey(report.key), report.eresult,
+                           report.detail, CDKeyReporter::Status(report));
 
         // // 步骤 6：同步上报
         // // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /

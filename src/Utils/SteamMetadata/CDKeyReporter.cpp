@@ -279,7 +279,7 @@ ServerResponse SendReport(const Report& r) {
 
     // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）只写日志，不重试，不影响 Steam 的激活流程。
     if (!out.httpOk) {
-        LOG_NETPACKET_WARN("CDKey report failed key={} status={} ok={} body={}",
+        LOG_REGISTERCDKEY_DEBUG("CDKey report failed key={} status={} ok={} body={}",
                            MaskKey(r.key), res.status, res.ok, res.body);
         return out;
     }
@@ -288,7 +288,7 @@ ServerResponse SendReport(const Report& r) {
     //   eresult 必须有，没有就当作格式不对；另外两个字段可选。
     out.parsed = GetInt(res.body, "eresult", out.eresult);
     if (!out.parsed) {
-        LOG_NETPACKET_WARN("CDKey report sent key={} but response has no eresult, body={}",
+        LOG_REGISTERCDKEY_DEBUG("CDKey report sent key={} but response has no eresult, body={}",
                            MaskKey(r.key), res.body);
         return out;
     }
@@ -296,7 +296,7 @@ ServerResponse SendReport(const Report& r) {
     GetString(res.body, "error_message", out.errorMessage);
 
     // 步骤 4：写日志。同时打出 Steam 的结果，方便对比两边是否一致。
-    LOG_NETPACKET_INFO("CDKey report sent key={} steam: eresult={} detail={} | "
+    LOG_REGISTERCDKEY_DEBUG("CDKey report sent key={} steam: eresult={} detail={} | "
                        "server: eresult={} detail={} error_message={}",
                        MaskKey(r.key), r.eresult, r.detail,
                        out.eresult, out.detail, out.errorMessage);
@@ -315,7 +315,7 @@ std::string GetMachineId() {
                                         RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
                                         nullptr, buf, &bytes);
         if (st != ERROR_SUCCESS) {
-            LOG_NETPACKET_WARN("CDKey: failed to read MachineGuid ({})", static_cast<long>(st));
+            LOG_REGISTERCDKEY_DEBUG("CDKey: failed to read MachineGuid ({})", static_cast<long>(st));
             return std::string();
         }
         // MachineGuid 是 GUID 字符串，只有 ASCII，直接逐字符转换。
@@ -343,7 +343,7 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
 
     // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）一律拒绝。
     if (!out.httpOk) {
-        LOG_NETPACKET_WARN("CDKey check failed key={} status={} ok={} -> deny",
+        LOG_REGISTERCDKEY_DEBUG("CDKey check failed key={} status={} ok={} -> deny",
                            MaskKey(key), res.status, res.ok);
         return out;
     }
@@ -351,7 +351,7 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     // 步骤 3：解析 allow。没有 allow 字段也当作拒绝。
     bool allow = false;
     if (!GetBool(res.body, "allow", allow)) {
-        LOG_NETPACKET_WARN("CDKey check key={} response has no allow, body={} -> deny",
+        LOG_REGISTERCDKEY_DEBUG("CDKey check key={} response has no allow, body={} -> deny",
                            MaskKey(key), res.body);
         return out;
     }
@@ -364,7 +364,7 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
         GetString(res.body, "error_message", out.errorMessage);
     }
 
-    LOG_NETPACKET_INFO("CDKey check key={} allow={} detail={} error_message={}",
+    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} allow={} detail={} error_message={}",
                        MaskKey(key), out.allow, out.detail, out.errorMessage);
     return out;
 }
