@@ -750,34 +750,63 @@ namespace Hooks_NetPacket_Manifest {
 //
 //  只读：发送时记下 key，收到响应后把 key + 结果交给 CDKeyReporter
 //  同步上报。两个方向的包都不做任何修改。
+//
+//  背景：在 Steam 客户端里"激活产品"时，客户端发 743，body 里只有 key；
+//  服务器回 763，body 里有 eresult（1 = 成功）和 purchase_result_details
+//  （失败原因，例如 15 = 已被其他账号激活）。763 的 body 里不带 key，
+//  所以要在发送时把 key 记下来，收到响应时再对上。
+//
+//  请求和响应怎么对上：
+//    发送包 header 的 jobid_source == 响应包 header 的 jobid_target。
+//    响应没带有效 job id 时，退一步按发送顺序取最早的一个（FIFO）。
+//
+//  只能看到这台电脑上、装了本工具的 Steam 客户端发起的激活，
+//  别人在其他电脑上激活你的 key，这里收不到。
+//
+//  线程：HandleSend / HandleRecv 都在 Steam 网络线程里被 SendJob / RecvJob 调用。
+//  SendReport 是同步的，会让网络线程等到 HTTP 完成或超时（见 CDKeyReporter.cpp 的 kTimeoutMs）。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_CDKey {
 
+    // 一条已发出、还在等结果的激活请求。
     struct Pending {
-        uint64      jobId;
-        std::string key;
-        uint64      steamId;
+        uint64      jobId;      // 发送包 header 的 jobid_source，用来和响应对上
+        std::string key;        // 完整的 CDKey（只在内存里，日志里会掩码）
+        uint64      steamId;    // 发送包 header 里的 SteamID（执行激活的账号）
     };
 
     // 等待响应的激活请求（一般同时只有一个，限制长度防止堆积）。
+    // 用 deque：新请求加到队尾，超过上限时从队头丢掉最旧的（比如一直没等到响应的）。
     std::deque<Pending> g_Pending;
+    // 保护 g_Pending。发送和接收理论上都在网络线程，加锁是为了保险。
     std::mutex g_Mutex;
     constexpr size_t kMaxPending = 16;
 
     // Steam 的无效 job id（k_GIDNil），也是 proto 里的默认值。
     constexpr uint64 kInvalidJobId = ~0ull;
 
+    // 0 和 ~0 都当作"没有 job id"。
     inline bool IsValidJobId(uint64 id) { return id != 0 && id != kInvalidJobId; }
+
+    // 发送（eMsg 743）。步骤：
+    //   1. 解析 body 为 CMsgClientRegisterKey，取出 key；解析失败或没有 key 就不处理；
+    //   2. 解析 header，取出 jobid_source 和 steamid（header 解析失败时
+    //      jobId 记为无效值，之后只能靠 FIFO 匹配）；
+    //   3. 写日志（key 掩码，只显示最后 5 位）；
+    //   4. 加锁放进 g_Pending 队尾，超过 kMaxPending 就丢掉最旧的。
+    // 不返回任何东西，SendJob 也不设置 g_NeedReplaceSend，所以发送包原样发出。
 
     void HandleSend(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
+        // 步骤 1：解析请求 body，取 key
         CMsgClientRegisterKey req;
         if (!req.ParseFromArray(pBody, cbBody) || !req.has_key()) {
             LOG_NETPACKET_WARN("CDKey send: failed to parse CMsgClientRegisterKey");
             return;
         }
 
+        // 步骤 2：解析 header，取 jobid_source 和 steamid
         CMsgProtoBufHeader hdr;
         uint64 jobId = kInvalidJobId, steamId = 0;
         if (hdr.ParseFromArray(pHdr, cbHdr)) {
@@ -785,25 +814,42 @@ namespace Hooks_NetPacket_CDKey {
             steamId = hdr.steamid();
         }
 
+        // 步骤 3：写日志（key 掩码）
         LOG_NETPACKET_INFO("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(req.key()), jobId);
+
+        // 步骤 4：记进待匹配队列
 
         std::lock_guard<std::mutex> lock(g_Mutex);
         g_Pending.push_back({jobId, req.key(), steamId});
         while (g_Pending.size() > kMaxPending) g_Pending.pop_front();
     }
 
+    // 接收（eMsg 763）。步骤：
+    //   1. 解析 body 为 CMsgClientPurchaseResponse，取 eresult 和 purchase_result_details；
+    //   2. 解析 header，取 jobid_target；
+    //   3. 加锁在 g_Pending 里找对应的请求：有有效 job id 就精确匹配，
+    //      没有就取最早的一个；找不到说明不是 CDKey 激活（比如商店购买），直接忽略；
+    //      找到后从队列里移除；
+    //   4. 组装 CDKeyReporter::Report（key、steamId、eresult、detail）；
+    //   5. 写日志（key 掩码，附带归类后的 status，例如 activated / used_by_other_account）；
+    //   6. 同步上报到你的 HTTP 接口，失败只写日志。
+    // 第 3 步结束就释放锁，HTTP 请求不会在持有锁时进行。
+    // 同样不设置 g_NeedReplaceBody / g_NeedReplaceHdr，接收包原样交给 Steam。
     void HandleRecv(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
+        // 步骤 1：解析响应 body
         CMsgClientPurchaseResponse resp;
         if (!resp.ParseFromArray(pBody, cbBody)) {
             LOG_NETPACKET_WARN("CDKey recv: failed to parse CMsgClientPurchaseResponse");
             return;
         }
 
+        // 步骤 2：解析 header，取 jobid_target
         CMsgProtoBufHeader hdr;
         const uint64 jobId = hdr.ParseFromArray(pHdr, cbHdr) ? hdr.jobid_target() : kInvalidJobId;
 
+        // 步骤 3：找到对应的请求并移出队列（花括号限定锁的范围）
         Pending pending;
         {
             std::lock_guard<std::mutex> lock(g_Mutex);
@@ -825,16 +871,19 @@ namespace Hooks_NetPacket_CDKey {
             g_Pending.erase(it);
         }
 
+        // 步骤 4：组装上报内容
         CDKeyReporter::Report report;
         report.key     = std::move(pending.key);
         report.steamId = pending.steamId;
         report.eresult = resp.eresult();
         report.detail  = resp.purchase_result_details();
 
+        // 步骤 5：写日志
         LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={} status={}",
                            CDKeyReporter::MaskKey(report.key), report.eresult,
                            report.detail, CDKeyReporter::Status(report));
 
+        // 步骤 6：同步上报
         CDKeyReporter::SendReport(report);   // 同步上报，失败只写日志
     }
 
