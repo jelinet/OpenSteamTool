@@ -99,6 +99,54 @@ namespace {
     // raw_header / raw_body 是收到的原始字节，用 protobuf 按
     // CMsgProtoBufHeader / CMsgClientPurchaseResponse 解码即可还原全部字段。
     // steamid 用字符串，避免 JS 等语言里 64 位整数丢精度。
+    //
+    // ── 成功示例（本次激活成功，游戏已加到账号）──
+    //   {
+    //     "key": "AAAAA-BBBBB-CCCCC",
+    //     "steamid": "76561198000000000",
+    //     "eresult": 1,                          // 1 = k_EResultOK
+    //     "detail": 0,                           // 成功时为 0（没有失败原因）
+    //     "status": "activated",
+    //     "steam_response": {
+    //       "header_eresult": 1,
+    //       "header_error_message": "",
+    //       "eresult": 1,
+    //       "purchase_result_details": 0,
+    //       "purchase_receipt_info": "AHBhY2thZ2Vz...",  // 成功时一般有内容：激活到的
+    //                                                    // package 等信息（二进制 KeyValues）
+    //       "raw_header": "CQAAAAAAAAAA...",
+    //       "raw_body": "CAEQABq..."
+    //     }
+    //   }
+    //
+    // ── 失败示例（key 已被其他账号激活）──
+    //   {
+    //     "key": "AAAAA-BBBBB-CCCCC",
+    //     "steamid": "76561198000000000",
+    //     "eresult": 2,                          // 不等于 1 就是失败，常见为 2 = k_EResultFail
+    //     "detail": 15,                          // EPurchaseResultDetail，失败原因
+    //     "status": "used_by_other_account",
+    //     "steam_response": {
+    //       "header_eresult": 2,
+    //       "header_error_message": "",          // 一般为空，Steam 有时会带说明
+    //       "eresult": 2,
+    //       "purchase_result_details": 15,
+    //       "purchase_receipt_info": "",         // 失败时一般为空
+    //       "raw_header": "CQAAAAAAAAAA...",
+    //       "raw_body": "CAIQDw=="
+    //     }
+    //   }
+    //
+    // 失败时 detail / status 的对应关系（其它值 status 都是 "failed"，看 detail 判断）：
+    //   detail  9 -> "already_owned"          账号已拥有该游戏
+    //   detail 13 -> "region_locked"          锁区，当前地区不能激活
+    //   detail 14 -> "invalid_key"            无效 key
+    //   detail 15 -> "used_by_other_account"  key 已被其他账号激活
+    //   detail 24 -> "requires_base_game"     需要先拥有本体（DLC key）
+    //   detail 53 -> "rate_limited"           尝试次数过多，稍后再试
+    //
+    // 注意：以上示例里的 base64 和 header_eresult 只是示意，没有用真实抓包验证。
+    // 判断成功与否以 body 里的 eresult == 1 为准（就是外层的 "eresult"）。
     std::string BuildJson(const Report& r) {
         std::string json = "{\"key\":\"" + JsonEscape(r.key) + "\"";
         json += ",\"steamid\":\"" + std::to_string(r.steamId) + "\"";
