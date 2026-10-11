@@ -1048,9 +1048,9 @@ namespace Hooks_NetPacket_CDKey {
         // 步骤 5：写日志（debug 级别打出 Steam 响应的完整 header 和 body）
         LOG_NETPACKET_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
         LOG_NETPACKET_DEBUG("CDKey recv raw body:\n{}", resp.DebugString());
-        LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={} status={}",
-                           CDKeyReporter::MaskKey(report.key), report.eresult,
-                           report.detail, CDKeyReporter::Status(report));
+        LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={}",
+                           CDKeyReporter::MaskKey(pending.key), resp.eresult(),
+                           resp.purchase_result_details());
 
         // // 步骤 6：同步上报
         // // 返回值是你的接口按 Steam 763 格式返回的结果（eresult / purchase_result_details /
