@@ -53,8 +53,51 @@ namespace {
         return out;
     }
 
+    // 标准 base64 编码，用来把二进制原始字节放进 JSON。
+    std::string Base64(const std::string& in) {
+        static constexpr char kTable[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve((in.size() + 2) / 3 * 4);
+        size_t i = 0;
+        for (; i + 2 < in.size(); i += 3) {
+            const uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8) | uint8_t(in[i + 2]);
+            out += kTable[(v >> 18) & 63];
+            out += kTable[(v >> 12) & 63];
+            out += kTable[(v >> 6) & 63];
+            out += kTable[v & 63];
+        }
+        if (i + 1 == in.size()) {
+            const uint32_t v = uint8_t(in[i]) << 16;
+            out += kTable[(v >> 18) & 63];
+            out += kTable[(v >> 12) & 63];
+            out += "==";
+        } else if (i + 2 == in.size()) {
+            const uint32_t v = (uint8_t(in[i]) << 16) | (uint8_t(in[i + 1]) << 8);
+            out += kTable[(v >> 18) & 63];
+            out += kTable[(v >> 12) & 63];
+            out += kTable[(v >> 6) & 63];
+            out += '=';
+        }
+        return out;
+    }
+
     // TODO: 上报的 JSON 格式，按你的接口修改。当前格式：
-    //   {"key":"XXXXX-XXXXX-XXXXX","steamid":"7656...","eresult":1,"detail":0,"status":"activated"}
+    //   {
+    //     "key": "XXXXX-XXXXX-XXXXX", "steamid": "7656...",
+    //     "eresult": 1, "detail": 0, "status": "activated",
+    //     "steam_response": {                       // Steam 763 响应的原样内容
+    //       "header_eresult": 1,                    // header 里的 eresult
+    //       "header_error_message": "",             // header 里的 error_message
+    //       "eresult": 1,                           // body 里的 eresult
+    //       "purchase_result_details": 0,           // body 里的失败原因
+    //       "purchase_receipt_info": "base64...",   // body 里的购买收据（二进制，base64）
+    //       "raw_header": "base64...",              // 原始 header 字节（base64）
+    //       "raw_body": "base64..."                 // 原始 body 字节（base64）
+    //     }
+    //   }
+    // raw_header / raw_body 是收到的原始字节，用 protobuf 按
+    // CMsgProtoBufHeader / CMsgClientPurchaseResponse 解码即可还原全部字段。
     // steamid 用字符串，避免 JS 等语言里 64 位整数丢精度。
     std::string BuildJson(const Report& r) {
         std::string json = "{\"key\":\"" + JsonEscape(r.key) + "\"";
@@ -63,7 +106,16 @@ namespace {
         json += ",\"detail\":" + std::to_string(r.detail);
         json += ",\"status\":\"";
         json += Status(r);
-        json += "\"}";
+        json += "\"";
+        json += ",\"steam_response\":{";
+        json += "\"header_eresult\":" + std::to_string(r.headerEresult);
+        json += ",\"header_error_message\":\"" + JsonEscape(r.headerErrorMessage) + "\"";
+        json += ",\"eresult\":" + std::to_string(r.eresult);
+        json += ",\"purchase_result_details\":" + std::to_string(r.detail);
+        json += ",\"purchase_receipt_info\":\"" + Base64(r.receiptInfo) + "\"";
+        json += ",\"raw_header\":\"" + Base64(r.rawHeader) + "\"";
+        json += ",\"raw_body\":\"" + Base64(r.rawBody) + "\"";
+        json += "}}";
         return json;
     }
 

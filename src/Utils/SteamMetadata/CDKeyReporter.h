@@ -15,6 +15,13 @@ namespace CDKeyReporter {
         uint64_t    steamId = 0;    // 执行激活的账号 SteamID（拿不到时为 0）
         int32_t     eresult = 0;    // EResult，1 = OK
         int32_t     detail  = 0;    // EPurchaseResultDetail，失败原因
+
+        // ── Steam 763 响应的原样内容（不做任何加工）──
+        std::string rawHeader;          // 原始 protobuf header 字节（CMsgProtoBufHeader）
+        std::string rawBody;            // 原始 protobuf body 字节（CMsgClientPurchaseResponse）
+        int32_t     headerEresult = 0;  // header 里的 eresult
+        std::string headerErrorMessage; // header 里的 error_message（Steam 有时会带错误说明）
+        std::string receiptInfo;        // body 里的 purchase_receipt_info（二进制购买收据）
     };
 
     // 把结果归类成一个简短的状态字符串，例如 "activated"、"used_by_other_account"。

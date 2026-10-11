@@ -830,7 +830,9 @@ namespace Hooks_NetPacket_CDKey {
     //   3. 加锁在 g_Pending 里找对应的请求：有有效 job id 就精确匹配，
     //      没有就取最早的一个；找不到说明不是 CDKey 激活（比如商店购买），直接忽略；
     //      找到后从队列里移除；
-    //   4. 组装 CDKeyReporter::Report（key、steamId、eresult、detail）；
+    //   4. 组装 CDKeyReporter::Report（key、steamId、eresult、detail，
+    //      以及 Steam 响应的原样内容：原始 header / body 字节、header 的 eresult 和
+    //      error_message、body 的 purchase_receipt_info）；
     //   5. 写日志（key 掩码，附带归类后的 status，例如 activated / used_by_other_account）；
     //   6. 同步上报到你的 HTTP 接口，失败只写日志。
     // 第 3 步结束就释放锁，HTTP 请求不会在持有锁时进行。
@@ -847,7 +849,8 @@ namespace Hooks_NetPacket_CDKey {
 
         // 步骤 2：解析 header，取 jobid_target
         CMsgProtoBufHeader hdr;
-        const uint64 jobId = hdr.ParseFromArray(pHdr, cbHdr) ? hdr.jobid_target() : kInvalidJobId;
+        const bool hdrOk = hdr.ParseFromArray(pHdr, cbHdr);
+        const uint64 jobId = hdrOk ? hdr.jobid_target() : kInvalidJobId;
 
         // 步骤 3：找到对应的请求并移出队列（花括号限定锁的范围）
         Pending pending;
@@ -877,8 +880,18 @@ namespace Hooks_NetPacket_CDKey {
         report.steamId = pending.steamId;
         report.eresult = resp.eresult();
         report.detail  = resp.purchase_result_details();
+        // Steam 响应的原样内容：原始字节 + header / body 里的其它字段
+        report.rawHeader.assign(reinterpret_cast<const char*>(pHdr), cbHdr);
+        report.rawBody.assign(reinterpret_cast<const char*>(pBody), cbBody);
+        report.receiptInfo = resp.purchase_receipt_info();
+        if (hdrOk) {
+            report.headerEresult      = hdr.eresult();
+            report.headerErrorMessage = hdr.error_message();
+        }
 
-        // 步骤 5：写日志
+        // 步骤 5：写日志（debug 级别打出 Steam 响应的完整 header 和 body）
+        LOG_NETPACKET_DEBUG("CDKey recv raw header:\n{}", hdr.DebugString());
+        LOG_NETPACKET_DEBUG("CDKey recv raw body:\n{}", resp.DebugString());
         LOG_NETPACKET_INFO("CDKey recv: key={} eresult={} detail={} status={}",
                            CDKeyReporter::MaskKey(report.key), report.eresult,
                            report.detail, CDKeyReporter::Status(report));
