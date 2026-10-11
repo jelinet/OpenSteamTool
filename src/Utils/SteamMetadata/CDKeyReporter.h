@@ -46,6 +46,29 @@ namespace CDKeyReporter {
     // 返回值见 ServerResponse；失败只写日志，不重试。
     ServerResponse SendReport(const Report& r);
 
+    // ── 激活前的机器码校验 ──
+    // 你的校验接口返回 JSON，例如：
+    //   允许：{"allow":true}
+    //   拒绝：{"allow":false,"purchase_result_details":15,"error_message":"key 已绑定其他机器"}
+    // 拒绝时 purchase_result_details 决定 Steam 界面显示的失败原因，不填默认 14（无效 key）。
+    struct CheckResponse {
+        bool        allow      = false;  // true = 放行，激活请求照常发给 Steam
+        bool        httpOk     = false;  // HTTP 请求成功且状态码是 2xx
+        uint32_t    httpStatus = 0;      // HTTP 状态码（请求没发出去时为 0）
+        int32_t     detail     = 14;     // 拒绝时回给 Steam 的 purchase_result_details
+        std::string errorMessage;        // 接口返回的 error_message（只写日志）
+        std::string rawBody;             // 接口返回的原始 body，方便排查
+    };
+
+    // 激活前同步调用校验接口（在 Steam 网络线程里、743 发出之前执行）。
+    // 请求 JSON：{"key":"...","steamid":"7656...","machine_id":"..."}
+    // 接口连不上、超时、非 2xx、返回里没有 allow 字段：一律当作拒绝（allow = false）。
+    CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId);
+
+    // 本机机器码：读注册表 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
+    // （Windows 安装时生成，重装系统会变）。读不到时返回空字符串。
+    std::string GetMachineId();
+
     // 日志用：只显示 key 的最后 5 位。
     std::string MaskKey(const std::string& key);
 

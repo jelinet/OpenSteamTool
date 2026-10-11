@@ -5,16 +5,29 @@
 
 #include <cstdio>
 
+// 读注册表里的 MachineGuid 用
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 namespace CDKeyReporter {
 namespace {
 
     // TODO: 上报地址（POST，body 为 JSON）。
     constexpr const char* kReportUrl = "https://example.com/api/cdkey/report";
 
-    // TODO: 需要的话加上鉴权等请求头，每行以 \r\n 结尾。
+    // TODO: 激活前的机器码校验地址（POST，body 为 JSON，返回格式见 CDKeyReporter.h 的 CheckResponse）。
+    // 校验失败（连不上 / 超时 / 非 2xx / 格式不对）都会拦下激活，所以这个接口要稳定、响应要快。
+    constexpr const char* kCheckUrl = "https://example.com/api/cdkey/check";
+
+    // TODO: 需要的话加上鉴权等请求头，每行以 \r\n 结尾（上报和校验共用）。
     constexpr const wchar_t* kHeaders = L"Content-Type: application/json\r\n";
 
-    // TODO: 超时（毫秒）。同步上报会让 Steam 网络线程停下来等，
+    // TODO: 超时（毫秒，上报和校验共用）。同步上报会让 Steam 网络线程停下来等，
     // 解析 / 连接 / 发送 / 接收各用这个值，最坏情况约 4 倍。不要设太大。
     constexpr uint32_t kTimeoutMs = 2000;
 
@@ -134,6 +147,15 @@ namespace {
             }
         }
         return false;   // 字符串没有结束引号
+    }
+
+    // 读取布尔字段，只认 true / false。
+    bool GetBool(const std::string& json, const char* name, bool& out) {
+        size_t pos = FindValue(json, name);
+        if (pos == std::string::npos) return false;
+        if (json.compare(pos, 4, "true") == 0)  { out = true;  return true; }
+        if (json.compare(pos, 5, "false") == 0) { out = false; return true; }
+        return false;
     }
 
     // TODO: 上报的 JSON 格式，按你的接口修改。当前格式：
@@ -278,6 +300,72 @@ ServerResponse SendReport(const Report& r) {
                        "server: eresult={} detail={} error_message={}",
                        MaskKey(r.key), r.eresult, r.detail,
                        out.eresult, out.detail, out.errorMessage);
+    return out;
+}
+
+std::string GetMachineId() {
+    // 只读一次，之后用缓存（机器码在 Steam 运行期间不会变）。
+    static const std::string cached = [] {
+        wchar_t buf[128] = {};
+        DWORD bytes = sizeof(buf);
+        // RRF_SUBKEY_WOW6464KEY：32 位进程也读 64 位注册表视图，
+        // 否则 32 位 Steam 里会被重定向，读不到 MachineGuid。
+        const LSTATUS st = RegGetValueW(HKEY_LOCAL_MACHINE,
+                                        L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
+                                        RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                                        nullptr, buf, &bytes);
+        if (st != ERROR_SUCCESS) {
+            LOG_NETPACKET_WARN("CDKey: failed to read MachineGuid ({})", static_cast<long>(st));
+            return std::string();
+        }
+        // MachineGuid 是 GUID 字符串，只有 ASCII，直接逐字符转换。
+        std::string out;
+        for (const wchar_t* p = buf; *p; ++p) out += static_cast<char>(*p);
+        return out;
+    }();
+    return cached;
+}
+
+CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
+    // 步骤 1：组装请求 JSON（TODO: 需要别的字段就在这里加），同步 POST 到校验接口。
+    std::string body = "{\"key\":\"" + JsonEscape(key) + "\"";
+    body += ",\"steamid\":\"" + std::to_string(steamId) + "\"";
+    body += ",\"machine_id\":\"" + JsonEscape(GetMachineId()) + "\"}";
+    auto res = OSTPlatform::Http::Execute(L"POST", kCheckUrl,
+                                          body.data(), static_cast<uint32_t>(body.size()),
+                                          kHeaders,
+                                          kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+
+    CheckResponse out;
+    out.httpStatus = res.status;
+    out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
+    out.rawBody    = res.body;
+
+    // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）一律拒绝。
+    if (!out.httpOk) {
+        LOG_NETPACKET_WARN("CDKey check failed key={} status={} ok={} -> deny",
+                           MaskKey(key), res.status, res.ok);
+        return out;
+    }
+
+    // 步骤 3：解析 allow。没有 allow 字段也当作拒绝。
+    bool allow = false;
+    if (!GetBool(res.body, "allow", allow)) {
+        LOG_NETPACKET_WARN("CDKey check key={} response has no allow, body={} -> deny",
+                           MaskKey(key), res.body);
+        return out;
+    }
+    out.allow = allow;
+
+    // 步骤 4：拒绝时读取失败原因（可选字段）。
+    if (!allow) {
+        int32_t detail = 0;
+        if (GetInt(res.body, "purchase_result_details", detail)) out.detail = detail;
+        GetString(res.body, "error_message", out.errorMessage);
+    }
+
+    LOG_NETPACKET_INFO("CDKey check key={} allow={} detail={} error_message={}",
+                       MaskKey(key), out.allow, out.detail, out.errorMessage);
     return out;
 }
 
