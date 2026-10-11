@@ -61,6 +61,7 @@ namespace CDKeyReporter {
         int32_t     eresult    = 2;      // 回给 Steam 界面的 eresult；默认 2（Fail）
         int32_t     detail     = 14;     // 回给 Steam 界面的 purchase_result_details；默认 14（无效 key）
         std::string errorMessage;        // 接口返回的 error_message（写进响应 header）
+        std::string appId;               // 接口返回的 app_id（成功时才有意义，没有为空）
         std::string rawBody;             // 接口返回的原始 body，方便排查
     };
 
@@ -69,6 +70,12 @@ namespace CDKeyReporter {
     // 接口连不上、超时、非 2xx、返回里没有 eresult 字段：eresult / detail 保持默认
     // （2 / 14），即按失败处理。
     CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId);
+
+    // 校验成功后补 lua：扫描 luaDir 下所有 .lua 文件，内容里已经出现 appId 就什么都不做；
+    // 一个都没有就新建 <appId>.lua，内容 "addappid(<appId>)"。
+    // appId 来自网络，必须全是数字（1~10 位）才处理，否则只写日志、不动文件
+    // （防止接口返回 "../x" 这类内容变成路径穿越）。失败只写日志，不影响激活流程。
+    void EnsureLuaForApp(const std::string& luaDir, const std::string& appId);
 
     // 本机机器码：读注册表 HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid
     // （Windows 安装时生成，重装系统会变）。读不到时返回空字符串。

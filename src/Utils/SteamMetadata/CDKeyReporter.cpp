@@ -3,7 +3,12 @@
 #include "OSTPlatform/include/Http.h"
 #include "Utils/Logging/Log.h"
 
+#include <cctype>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <system_error>
 
 // 读注册表里的 MachineGuid 用
 #ifndef WIN32_LEAN_AND_MEAN
@@ -357,16 +362,99 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     }
     out.eresult = eresult;
 
-    // 步骤 4：读取 purchase_result_details 和 error_message（都是可选字段）。
+    // 步骤 4：读取 purchase_result_details、error_message 和 app_id（都是可选字段）。
+    // app_id 兼容写成字符串（"367520"）或数字（367520）。
     // 成功（eresult == 1）时 detail 默认 0；失败时没给就保持 14。
     if (eresult == 1) out.detail = 0;
     int32_t detail = 0;
     if (GetInt(res.body, "purchase_result_details", detail)) out.detail = detail;
     GetString(res.body, "error_message", out.errorMessage);
+    if (!GetString(res.body, "app_id", out.appId)) {
+        int32_t appId = 0;
+        if (GetInt(res.body, "app_id", appId)) out.appId = std::to_string(appId);
+    }
 
-    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={}",
-                       MaskKey(key), out.eresult, out.detail, out.errorMessage);
+    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={} app_id={}",
+                       MaskKey(key), out.eresult, out.detail, out.errorMessage, out.appId);
     return out;
+}
+
+namespace {
+
+    // text 里是否出现 appId，并且前后都不是数字（避免 36752 误匹配 367520）。
+    bool ContainsAppId(const std::string& text, const std::string& appId) {
+        for (size_t pos = text.find(appId); pos != std::string::npos; pos = text.find(appId, pos + 1)) {
+            const bool leftOk  = pos == 0 || text[pos - 1] < '0' || text[pos - 1] > '9';
+            const size_t end   = pos + appId.size();
+            const bool rightOk = end >= text.size() || text[end] < '0' || text[end] > '9';
+            if (leftOk && rightOk) return true;
+        }
+        return false;
+    }
+
+}
+
+void EnsureLuaForApp(const std::string& luaDir, const std::string& appId) {
+    namespace fs = std::filesystem;
+
+    // 只认纯数字的 appId：它会拼进文件名和文件内容，不能带路径分隔符或引号。
+    if (appId.empty() || appId.size() > 10 ||
+        appId.find_first_not_of("0123456789") != std::string::npos) {
+        LOG_REGISTERCDKEY_DEBUG("CDKey lua: invalid app_id '{}', skip", appId);
+        return;
+    }
+
+    std::error_code ec;
+    const fs::path dir(luaDir);
+    fs::create_directories(dir, ec);   // 目录已存在不算错误
+
+    // 扫描已有的 .lua，内容里出现过 appId 就什么都不做。
+    for (fs::directory_iterator it(dir, ec), endIt; !ec && it != endIt; it.increment(ec)) {
+        std::error_code fe;
+        if (!it->is_regular_file(fe) || fe) continue;
+        std::string ext = it->path().extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext != ".lua") continue;
+
+        std::ifstream in(it->path(), std::ios::binary);
+        if (!in) continue;
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (ContainsAppId(text, appId)) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: app_id {} already in {}, nothing to do",
+                               appId, it->path().filename().string());
+            return;
+        }
+    }
+
+    // 没有就新建 <appId>.lua。已经有同名文件（里面没有这个 appId）时不覆盖，只写日志。
+    const fs::path target = dir / (appId + ".lua");
+    if (fs::exists(target, ec)) {
+        LOG_REGISTERCDKEY_DEBUG("CDKey lua: {} exists but has no app_id {}, not overwriting",
+                           target.filename().string(), appId);
+        return;
+    }
+    // 先写成 .tmp 再改名：lua 目录有文件监视（LuaFileWatcher），直接写 .lua 的话
+    // 可能读到写了一半的内容；.tmp 不是 .lua，监视不会处理。
+    const fs::path tmp = dir / (appId + ".lua.tmp");
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: cannot create {}", tmp.string());
+            return;
+        }
+        out << "addappid(" << appId << ")";
+        if (!out.good()) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: write failed {}", tmp.string());
+            return;
+        }
+    }
+    fs::rename(tmp, target, ec);
+    if (ec) {
+        LOG_REGISTERCDKEY_DEBUG("CDKey lua: rename to {} failed ({})", target.string(), ec.message());
+        fs::remove(tmp, ec);
+        return;
+    }
+    LOG_REGISTERCDKEY_DEBUG("CDKey lua: created {}", target.string());
 }
 
 } // namespace CDKeyReporter
