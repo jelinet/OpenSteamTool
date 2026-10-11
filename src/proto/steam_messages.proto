@@ -475,9 +475,9 @@ enum EDisplayStatus {
 }
 
 // ============================================================
-// Example.Query#1 — template for Hooks_NetPacket_Example.
-// TODO: replace with the real request/response of the service
-// method you intercept (field numbers must match Steam's).
+// Example.Query#1 —— Hooks_NetPacket_Example 的模板消息。
+// TODO: 替换成你要拦截的 service method 的真实请求/响应定义
+// （字段编号必须和 Steam 的一致）。
 // ============================================================
 message CExample_Query_Request {
 	optional uint32 app_id = 1;

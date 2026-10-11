@@ -41,7 +41,6 @@ include(Lua)
 include(Spdlog)
 include(Protobuf)
 include(Tomlplusplus)
-include(Json)
 include(LogMacros)
 
 # Build the host code generators (ipc_codegen) in their own binary subtree so
@@ -162,7 +161,6 @@ target_link_libraries(OpenSteamTool PRIVATE
     $<$<CONFIG:Debug>:libprotobuf>
     $<$<CONFIG:Release>:libprotobuf-lite>
     tomlplusplus::tomlplusplus
-    nlohmann_json::nlohmann_json
     $<$<CONFIG:Debug>:spdlog::spdlog>
 )
 

@@ -129,7 +129,7 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
-    // TODO: real target_job_name of the service method to intercept.
+    // TODO: 改成要拦截的 service method 的真实 target_job_name。
     constexpr uint32 HASH_JOB_Example = Fnv1aHash("Example.Query#1");
 
 } // anonymous namespace
@@ -598,30 +598,31 @@ namespace Hooks_NetPacket_Manifest {
 
 
 // ════════════════════════════════════════════════════════════════
-//  Hooks_NetPacket_Example  (template)
+//  Hooks_NetPacket_Example（模板）
 //
-//  Outgoing: Example.Query#1  (eMsg 151)
-//  Incoming: Example.Query#1  (eMsg 147)
+//  发出：Example.Query#1  (eMsg 151)
+//  收到：Example.Query#1  (eMsg 147)
 //
-//  Send: parse the request, start an async HTTP fetch (ExampleClient),
-//        keyed by the header's jobid_source. The request itself is
-//        forwarded unchanged.
-//  Recv: match the response by jobid_target, wait up to kMaxWaitSeconds
-//        for the fetch, then rewrite header (eresult=OK) and body.
-//        On timeout/failure the original response passes through.
+//  发送时：解析请求，以 header 里的 jobid_source 为 key，在后台线程发起
+//          HTTP 请求（ExampleClient）。原请求不做修改，照常发给服务器。
+//  接收时：用 jobid_target 找到对应的 HTTP 结果，最多等待 kMaxWaitSeconds 秒，
+//          然后改写 header（eresult=OK）和 body。
+//          超时或失败时，服务器的原始响应原样放行。
 //
-//  TODO: HASH_JOB_Example, the CExample_Query_* proto messages and the
-//  field mapping below; URL + JSON parsing live in ExampleClient.cpp.
+//  TODO: HASH_JOB_Example、proto 中的 CExample_Query_* 消息，以及下面
+//  HandleRecv 里的字段映射。请求地址和 JSON 解析在 ExampleClient.cpp 里。
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Example {
 
     using FetchResult = std::optional<ExampleClient::Result>;
 
+    // jobid -> 后台 HTTP 任务
     std::unordered_map<uint64, std::shared_future<FetchResult>> g_Futures;
     std::mutex g_Mutex;
-    // Recv blocks Steam's network thread while waiting — keep this short.
+    // 接收时的等待会阻塞 Steam 网络线程，这个值不要设得太大。
     constexpr uint32 kMaxWaitSeconds = 5;
 
+    // 返回 true 表示要替换发出的包体（写入 g_SendNewBody / g_cbSendNewBody）。
     bool HandleSend(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
@@ -637,12 +638,13 @@ namespace Hooks_NetPacket_Example {
             return false;
         }
 
-        // TODO: filter which requests to handle, e.g. LuaConfig::HasDepot(...).
+        // TODO: 在这里过滤要处理的请求，例如 if (!LuaConfig::HasDepot(...)) return false;
         const uint64 jobId = hdr.jobid_source();
         const AppId_t appId = req.app_id();
 
         LOG_NETPACKET_DEBUG("Example send: app_id={} jobid={}", appId, jobId);
 
+        // 放到后台线程请求，避免卡住网络线程。
         auto task = std::async(std::launch::async, [appId]() -> FetchResult {
             ExampleClient::Result r;
             if (!ExampleClient::Fetch(appId, &r)) return std::nullopt;
@@ -654,8 +656,8 @@ namespace Hooks_NetPacket_Example {
             g_Futures[jobId] = task.share();
         }
 
-        // To modify the outgoing request instead: serialize into
-        // g_SendNewBody, set g_cbSendNewBody and return true.
+        // 如果想修改发出的请求：序列化到 g_SendNewBody，
+        // 设置 g_cbSendNewBody，然后 return true。
         return false;
     }
 
@@ -668,14 +670,15 @@ namespace Hooks_NetPacket_Example {
             return;
         }
 
+        // 响应的 jobid_target 等于请求的 jobid_source。
         const uint64 jobId = hdr.jobid_target();
         std::shared_future<FetchResult> future;
         {
             std::lock_guard<std::mutex> lock(g_Mutex);
             auto it = g_Futures.find(jobId);
-            if (it == g_Futures.end()) return;
+            if (it == g_Futures.end()) return;   // 不是我们发起的请求
             future = it->second;
-            g_Futures.erase(it);
+            g_Futures.erase(it);                 // 找到后立即清理
         }
 
         if (future.wait_for(std::chrono::seconds(kMaxWaitSeconds)) != std::future_status::ready) {
@@ -688,14 +691,15 @@ namespace Hooks_NetPacket_Example {
             return;
         }
 
-        // Start from the server's response so unknown fields are preserved.
+        // 在服务器原始响应的基础上修改，保留其它字段。
         CExample_Query_Response resp;
         if (!resp.ParseFromArray(pBody, cbBody)) resp.Clear();
 
-        // TODO: map ExampleClient::Result onto the response.
+        // TODO: 把 ExampleClient::Result 的字段写到响应里。
         resp.set_value(result->value);
         resp.set_text(result->text);
 
+        // header 改成成功，否则 Steam 会把这次请求当作失败处理。
         hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
         const uint32 cbNewHdr  = static_cast<uint32>(hdr.ByteSizeLong());
         const uint32 cbNewBody = static_cast<uint32>(resp.ByteSizeLong());
@@ -706,6 +710,7 @@ namespace Hooks_NetPacket_Example {
             return;
         }
 
+        // 设置标志，由 RecvPkt hook 统一替换包内容。
         g_cbNewHdr  = cbNewHdr;
         g_cbNewBody = cbNewBody;
         g_NeedReplaceHdr  = true;
@@ -1275,7 +1280,7 @@ namespace {
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
-        case HASH_JOB_Example:
+        case HASH_JOB_Example:   // 示例模板：发送时发起 HTTP 请求
             return Hooks_NetPacket_Example::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
         // ---- add new 151 service methods here ----
@@ -1353,7 +1358,7 @@ namespace {
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
-        case HASH_JOB_Example:
+        case HASH_JOB_Example:   // 示例模板：接收时改写响应
             Hooks_NetPacket_Example::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
