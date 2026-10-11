@@ -41,6 +41,7 @@ include(Lua)
 include(Spdlog)
 include(Protobuf)
 include(Tomlplusplus)
+include(Json)
 include(LogMacros)
 
 # Build the host code generators (ipc_codegen) in their own binary subtree so
@@ -110,6 +111,7 @@ add_library(OpenSteamTool SHARED
     Utils/CloudRedirect/CloudRedirectHost.cpp
     Utils/HookSupport/VehCommon.cpp
     Utils/Logging/Log.cpp
+    Utils/SteamMetadata/ExampleClient.cpp
     Utils/SteamMetadata/IPCLoader.cpp
     Utils/SteamMetadata/ManifestClient.cpp
     Utils/SteamMetadata/PatternLoader.cpp
@@ -160,6 +162,7 @@ target_link_libraries(OpenSteamTool PRIVATE
     $<$<CONFIG:Debug>:libprotobuf>
     $<$<CONFIG:Release>:libprotobuf-lite>
     tomlplusplus::tomlplusplus
+    nlohmann_json::nlohmann_json
     $<$<CONFIG:Debug>:spdlog::spdlog>
 )
 

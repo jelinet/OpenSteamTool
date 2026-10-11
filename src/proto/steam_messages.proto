@@ -473,3 +473,17 @@ enum EDisplayStatus {
     k_EDisplayStatusDownloadFailed = 38;
     k_EDisplayStatusUpdateFailed = 39;
 }
+
+// ============================================================
+// Example.Query#1 — template for Hooks_NetPacket_Example.
+// TODO: replace with the real request/response of the service
+// method you intercept (field numbers must match Steam's).
+// ============================================================
+message CExample_Query_Request {
+	optional uint32 app_id = 1;
+}
+
+message CExample_Query_Response {
+	optional uint64 value = 1;
+	optional string text = 2;
+}

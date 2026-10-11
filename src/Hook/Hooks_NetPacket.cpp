@@ -1,5 +1,6 @@
 #include "Hooks_NetPacket.h"
 #include "Utils/SteamMetadata/ManifestClient.h"
+#include "Utils/SteamMetadata/ExampleClient.h"
 #include "Hooks_Misc.h"
 #include "HookMacros.h"
 #include "dllmain.h"
@@ -11,6 +12,7 @@
 #include <deque>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -127,6 +129,8 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
+    // TODO: real target_job_name of the service method to intercept.
+    constexpr uint32 HASH_JOB_Example = Fnv1aHash("Example.Query#1");
 
 } // anonymous namespace
 
@@ -591,6 +595,126 @@ namespace Hooks_NetPacket_Manifest {
     }
 
 } // namespace Hooks_NetPacket_Manifest
+
+
+// ════════════════════════════════════════════════════════════════
+//  Hooks_NetPacket_Example  (template)
+//
+//  Outgoing: Example.Query#1  (eMsg 151)
+//  Incoming: Example.Query#1  (eMsg 147)
+//
+//  Send: parse the request, start an async HTTP fetch (ExampleClient),
+//        keyed by the header's jobid_source. The request itself is
+//        forwarded unchanged.
+//  Recv: match the response by jobid_target, wait up to kMaxWaitSeconds
+//        for the fetch, then rewrite header (eresult=OK) and body.
+//        On timeout/failure the original response passes through.
+//
+//  TODO: HASH_JOB_Example, the CExample_Query_* proto messages and the
+//  field mapping below; URL + JSON parsing live in ExampleClient.cpp.
+// ════════════════════════════════════════════════════════════════
+namespace Hooks_NetPacket_Example {
+
+    using FetchResult = std::optional<ExampleClient::Result>;
+
+    std::unordered_map<uint64, std::shared_future<FetchResult>> g_Futures;
+    std::mutex g_Mutex;
+    // Recv blocks Steam's network thread while waiting — keep this short.
+    constexpr uint32 kMaxWaitSeconds = 5;
+
+    bool HandleSend(const uint8* pBody, uint32 cbBody,
+                    const uint8* pHdr, uint32 cbHdr)
+    {
+        CExample_Query_Request req;
+        if (!req.ParseFromArray(pBody, cbBody)) {
+            LOG_NETPACKET_WARN("Example send: failed to parse request");
+            return false;
+        }
+
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_source()) {
+            LOG_NETPACKET_WARN("Example send: missing jobid_source in header");
+            return false;
+        }
+
+        // TODO: filter which requests to handle, e.g. LuaConfig::HasDepot(...).
+        const uint64 jobId = hdr.jobid_source();
+        const AppId_t appId = req.app_id();
+
+        LOG_NETPACKET_DEBUG("Example send: app_id={} jobid={}", appId, jobId);
+
+        auto task = std::async(std::launch::async, [appId]() -> FetchResult {
+            ExampleClient::Result r;
+            if (!ExampleClient::Fetch(appId, &r)) return std::nullopt;
+            return r;
+        });
+
+        {
+            std::lock_guard<std::mutex> lock(g_Mutex);
+            g_Futures[jobId] = task.share();
+        }
+
+        // To modify the outgoing request instead: serialize into
+        // g_SendNewBody, set g_cbSendNewBody and return true.
+        return false;
+    }
+
+    void HandleRecv(const uint8* pBody, uint32 cbBody,
+                    const uint8* pHdr, uint32 cbHdr)
+    {
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr)) {
+            LOG_NETPACKET_WARN("Example recv: failed to parse header");
+            return;
+        }
+
+        const uint64 jobId = hdr.jobid_target();
+        std::shared_future<FetchResult> future;
+        {
+            std::lock_guard<std::mutex> lock(g_Mutex);
+            auto it = g_Futures.find(jobId);
+            if (it == g_Futures.end()) return;
+            future = it->second;
+            g_Futures.erase(it);
+        }
+
+        if (future.wait_for(std::chrono::seconds(kMaxWaitSeconds)) != std::future_status::ready) {
+            LOG_NETPACKET_WARN("Example recv: HTTP timed out for jobid={}", jobId);
+            return;
+        }
+        const FetchResult result = future.get();
+        if (!result) {
+            LOG_NETPACKET_WARN("Example recv: HTTP failed for jobid={}", jobId);
+            return;
+        }
+
+        // Start from the server's response so unknown fields are preserved.
+        CExample_Query_Response resp;
+        if (!resp.ParseFromArray(pBody, cbBody)) resp.Clear();
+
+        // TODO: map ExampleClient::Result onto the response.
+        resp.set_value(result->value);
+        resp.set_text(result->text);
+
+        hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
+        const uint32 cbNewHdr  = static_cast<uint32>(hdr.ByteSizeLong());
+        const uint32 cbNewBody = static_cast<uint32>(resp.ByteSizeLong());
+        if (cbNewHdr > kMaxHdrSize || cbNewBody > kMaxBodySize ||
+            !hdr.SerializeToArray(g_NewHdr, kMaxHdrSize) ||
+            !resp.SerializeToArray(g_NewBody, kMaxBodySize)) {
+            LOG_NETPACKET_WARN("Example recv: serialize failed (hdr={}, body={})", cbNewHdr, cbNewBody);
+            return;
+        }
+
+        g_cbNewHdr  = cbNewHdr;
+        g_cbNewBody = cbNewBody;
+        g_NeedReplaceHdr  = true;
+        g_NeedReplaceBody = true;
+
+        LOG_NETPACKET_DEBUG("Example recv: injected value={} for jobid={}", result->value, jobId);
+    }
+
+} // namespace Hooks_NetPacket_Example
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1151,6 +1275,9 @@ namespace {
         case HASH_JOB_GetManifestRequestCode:
             return Hooks_NetPacket_Manifest::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
+        case HASH_JOB_Example:
+            return Hooks_NetPacket_Example::HandleSend(pBody, cbBody, pHdr, cbHdr);
+
         // ---- add new 151 service methods here ----
         }
         return false;
@@ -1224,6 +1351,10 @@ namespace {
 
         case HASH_JOB_GetManifestRequestCode:
             Hooks_NetPacket_Manifest::HandleRecv(pBody, cbBody, pHdr, cbHdr);
+            return;
+
+        case HASH_JOB_Example:
+            Hooks_NetPacket_Example::HandleRecv(pBody, cbBody, pHdr, cbHdr);
             return;
 
         // ---- add new 147 service methods here ----
