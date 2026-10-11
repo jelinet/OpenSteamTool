@@ -40,8 +40,9 @@
 //
 //  UserStats "可能调"：借用账号来自 LuaConfig::GetStatSteamId(appid)：
 //    1. Lua 里用 setStat 配了 → 直接用，不发请求；
-//    2. 没配 → StatsClient::FetchStatSteamId 向 stats API 发 GET 查询
-//       （在 Steam 网络线程里同步执行，会让发送等待）；
+//    2. 没配，且配置里 [stats] enable_api 打开 → StatsClient::FetchStatSteamId
+//       向 stats API 发 GET 查询（在 Steam 网络线程里同步执行，会让发送等待；
+//       结果按 appid 缓存，同一个游戏只在第一次查询时发请求）；
 //    3. 查不到 → 用内置默认 SteamID。
 //
 //  怎么判断一个函数有没有改包：
@@ -373,8 +374,9 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // 步骤 4：换成借用账号的 SteamID
-        // 注意：没用 setStat 配置时，GetStatSteamId 会通过 StatsClient 同步发 HTTP GET
-        // 查询借用账号（在 Steam 网络线程里执行，会让发送等待），见文件开头总览。
+        // 注意：没用 setStat 配置、且打开了 [stats] enable_api 时，GetStatSteamId 会通过
+        // StatsClient 同步发 HTTP GET 查询借用账号（在 Steam 网络线程里执行，会让发送等待；
+        // 按 appid 缓存，只有第一次会发请求），见文件开头总览。
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steamid(newSteamId);
 
@@ -494,8 +496,9 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // 步骤 3：换成借用账号的 SteamID
-        // 注意：没用 setStat 配置时，GetStatSteamId 会通过 StatsClient 同步发 HTTP GET
-        // 查询借用账号（在 Steam 网络线程里执行，会让发送等待），见文件开头总览。
+        // 注意：没用 setStat 配置、且打开了 [stats] enable_api 时，GetStatSteamId 会通过
+        // StatsClient 同步发 HTTP GET 查询借用账号（在 Steam 网络线程里执行，会让发送等待；
+        // 按 appid 缓存，只有第一次会发请求），见文件开头总览。
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steam_id_for_user(newSteamId);
 
