@@ -18,6 +18,39 @@
 #include "steam_messages.pb.h"
 
 // ════════════════════════════════════════════════════════════════
+//  中文总览：各功能会不会改包、会不会调外部 HTTP 接口
+//
+//  ┌────────────────┬──────────────────────────────┬──────────────────────────────┬────────────────────────┐
+//  │ 功能（模块）   │ 拦截的请求                   │ 改了什么                     │ 调外部 HTTP 接口？     │
+//  ├────────────────┼──────────────────────────────┼──────────────────────────────┼────────────────────────┤
+//  │ AccessToken    │ 发送 8903 PICS 商品信息请求  │ 发送 body：写入 access_token │ 不调（token 来自 Lua） │
+//  │ UserStats 新   │ 发送 151 GetUserStats#1      │ 发送 body：steamid 换借用号  │ 可能调（见下）         │
+//  │                │ 接收 147 响应                │ 接收 header/body（原地改）   │ 不调                   │
+//  │ UserStats 旧   │ 发送 818 ClientGetUserStats  │ 发送 body：steam_id_for_user │ 可能调（见下）         │
+//  │                │                              │ 换借用号、schema 版本设 -1   │                        │
+//  │                │ 接收 819 响应                │ 接收 body                    │ 不调                   │
+//  │ OnlineFix      │ 发送 742/5410 正在玩的游戏   │ 发送 body：480 改真实游戏名  │ 不调                   │
+//  │ Manifest       │ 发送 GetManifestRequestCode  │ 发送不改；接收 header+body   │ 调 ManifestClient      │
+//  │                │                              │ （eresult=OK、填下载码）     │ （std::async 后台）    │
+//  │ Cloud          │ 云存档相关 service method    │ 不改 body：拦下不发          │ 不调（本地 Cloud-      │
+//  │                │                              │ （g_SuppressSend），本地回包 │ Redirect 处理）        │
+//  │ CDKey          │ 发送 743 / 接收 763          │ 都不改，只读记录             │ 调 CDKeyReporter       │
+//  │                │                              │                              │ （同步上报）           │
+//  └────────────────┴──────────────────────────────┴──────────────────────────────┴────────────────────────┘
+//
+//  UserStats "可能调"：借用账号来自 LuaConfig::GetStatSteamId(appid)：
+//    1. Lua 里用 setStat 配了 → 直接用，不发请求；
+//    2. 没配 → StatsClient::FetchStatSteamId 向 stats API 发 GET 查询
+//       （在 Steam 网络线程里同步执行，会让发送等待）；
+//    3. 查不到 → 用内置默认 SteamID。
+//
+//  怎么判断一个函数有没有改包：
+//    发送方向：有没有写 g_SendNewBody 并返回 true（SendJob 会据此设置 g_NeedReplaceSend），
+//              或者设置了 g_SuppressSend；
+//    接收方向：有没有设置 g_NeedReplaceBody / g_NeedReplaceHdr，或者原地改写（g_ResizedInPlace）。
+// ════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════
 //  Shared infrastructure
 // ════════════════════════════════════════════════════════════════
 namespace {
@@ -28,6 +61,17 @@ namespace {
     constexpr int    kPacketPoolSize = 8;
 
     // ── Incoming (RecvPkt) packet pool ─────────────────────
+    // 中文说明（接收方向）：处理模块和 RecvPkt hook 之间传话用的缓冲区和标志。
+    //   模块把新内容写进 g_NewBody / g_NewHdr，再把对应标志设为 true；
+    //   RecvPkt 看到任一标志为 true，就调用 ReplaceRecvPacket，
+    //   按 [MsgHdr][header][body] 拼新包（没换的部分用原来的），再交给 Steam。
+    //   g_NewBody / g_cbNewBody      ：新的响应 body 及长度
+    //   g_NewHdr  / g_cbNewHdr       ：新的 protobuf header 及长度（例如把 eresult 改成 OK）
+    //   g_NeedReplaceBody            ：true = 用 g_NewBody 替换 body
+    //   g_NeedReplaceHdr             ：true = 用 g_NewHdr 替换 header
+    //   g_ResizedInPlace / g_NewBodySize：模块直接改写了原 body 缓冲（UserStats 147），
+    //                                    只需要更新长度，不走上面两个标志
+    //   g_RecvPacketPool             ：拼新包用的环形缓冲池，避免覆盖还在被 Steam 使用的包
     uint8  g_NewBody[kMaxBodySize];
     uint32 g_cbNewBody   = 0;
     uint8  g_NewHdr[kMaxHdrSize];
@@ -40,6 +84,13 @@ namespace {
     int    g_RecvPacketPoolIdx = 0;
 
     // ── Outgoing (BBuildAndAsyncSendFrame) — same pattern ───────
+    // 中文说明（发送方向）：
+    //   g_SendNewBody / g_cbSendNewBody：模块把改好的请求 body 序列化到这里
+    //   g_NeedReplaceSend：SendJob 把处理函数的返回值存到这里；为 true 时
+    //                      BBuildAndAsyncSendFrame 调用 ReplaceSendPacket，
+    //                      按 [MsgHdr][原 header][新 body] 重新组包再发（发送方向只换 body）
+    //   g_SuppressSend   ：为 true 时这个请求不发给 Valve（Cloud 在本地回包）
+    //   g_SendPacketPool ：重新组包用的环形缓冲池
     uint8  g_SendNewBody[kMaxBodySize];
     uint32 g_cbSendNewBody = 0;
     bool   g_NeedReplaceSend = false;
@@ -322,6 +373,8 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // 步骤 4：换成借用账号的 SteamID
+        // 注意：没用 setStat 配置时，GetStatSteamId 会通过 StatsClient 同步发 HTTP GET
+        // 查询借用账号（在 Steam 网络线程里执行，会让发送等待），见文件开头总览。
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steamid(newSteamId);
 
@@ -441,6 +494,8 @@ namespace Hooks_NetPacket_UserStats {
         }
 
         // 步骤 3：换成借用账号的 SteamID
+        // 注意：没用 setStat 配置时，GetStatSteamId 会通过 StatsClient 同步发 HTTP GET
+        // 查询借用账号（在 Steam 网络线程里执行，会让发送等待），见文件开头总览。
         uint64_t newSteamId = LuaConfig::GetStatSteamId(appId);
         req.set_steam_id_for_user(newSteamId);
 
