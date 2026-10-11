@@ -83,6 +83,11 @@ namespace {
     }
 
     // ── Incoming: replace header and/or body (ring-buffer pool) ──
+    // 把接收包替换成 [MsgHdr(eMsg + header 长度)] [新 header] [新 body]：
+    // 在环形缓冲池 g_RecvPacketPool 里拼好新包，再把 p->m_pubData 指向它、
+    // m_cubData 改成新长度。之后 RecvPkt 把这个包交给原函数 oRecvPkt，
+    // Steam 看到的就是修改后的内容。新包超过缓冲大小时不替换，原包照常放行。
+    // 用环形池而不是单个缓冲，是为了防止 Steam 还在用上一个包时被覆盖。
     inline void ReplaceRecvPacket(CNetPacket* p,
                                   const uint8* pNewHdr, uint32 cbNewHdr,
                                   const uint8* pNewBody, uint32 cbNewBody)
@@ -515,9 +520,20 @@ namespace Hooks_NetPacket_FamilySharing {
 // ════════════════════════════════════════════════════════════════
 namespace Hooks_NetPacket_Manifest {
 
+    // 背景：Steam 下载游戏前要先向服务器要一个"清单下载码"。
+    // 账号不拥有这个游戏时，Valve 会返回失败（eresult 不是 OK，也没有下载码）。
+
+    // jobid_source -> 后台取码任务的 future。发送时存进来，收到响应时按 jobid_target 取出。
     std::unordered_map<uint64, std::shared_future<uint64>> g_CodeFutures;
     std::mutex g_CodeMutex;
+    // 收到响应时最多等后台 HTTP 多少秒。这段时间 Steam 网络线程会卡住。
     constexpr uint32 kMaxWaitSeconds = 12;
+
+    // 第 1 步（发送，eMsg 151）：只处理 addappid 里配置了的 depot。
+    // 用 std::async 开后台线程，调用 ManifestClient::FetchManifestRequestCode
+    // 从第三方 HTTP 源取下载码，并把 future 按 jobid_source 存进 g_CodeFutures。
+    // future 被存了起来，不会马上析构，所以这里不会阻塞。
+    // 发送包本身不改，照常发给 Valve。
 
     bool HandleSend(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
@@ -559,6 +575,13 @@ namespace Hooks_NetPacket_Manifest {
         return false; // Don't modify the outgoing request body
     }
 
+    // 第 2 步（接收，eMsg 147）：用响应 header 的 jobid_target 找到发送时存的 future，
+    // 最多等 kMaxWaitSeconds 秒。超时或拿到的码为 0 就直接 return，原包放行，
+    // Steam 看到的仍是 Valve 的原始结果。
+    // 第 3 步：拿到码后替换 header 和 body（见下面的注释），
+    // 真正写回包的是 RecvPkt hook 里的 ReplaceRecvPacket。
+    // 结果：Steam 以为 Valve 返回了成功和有效的下载码，会用它去 CDN 下载清单。
+    // 一般发送时 HTTP 就开始了，响应回来时多半已经完成，实际等待时间很短。
     void HandleRecv(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
@@ -595,6 +618,10 @@ namespace Hooks_NetPacket_Manifest {
                             code, jobId);
 
         // Header: set eresult=OK
+        // header：在原 header 上只把 eresult 改成 OK，jobid 等其它字段不变，
+        // 写到 g_NewHdr，并设置 g_NeedReplaceHdr。
+        // 注意：header 先标记替换，如果下面 body 序列化失败，会出现 header 为 OK、
+        // body 还是原始内容的情况（body 只有一个字段，实际几乎不会发生）。
         hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
         g_cbNewHdr = static_cast<uint32>(hdr.ByteSizeLong());
         if (g_cbNewHdr > kMaxHdrSize || !hdr.SerializeToArray(g_NewHdr, kMaxHdrSize)){
@@ -605,6 +632,8 @@ namespace Hooks_NetPacket_Manifest {
         g_NeedReplaceHdr = true;
 
         // Body: set manifest_request_code
+        // body：不改原 body，新建一个响应，只填 manifest_request_code，
+        // 写到 g_NewBody，并设置 g_NeedReplaceBody。
         CContentServerDirectory_GetManifestRequestCode_Response resp;
         resp.set_manifest_request_code(code);
 
