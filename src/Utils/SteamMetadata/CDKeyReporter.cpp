@@ -490,30 +490,36 @@ void EnsureLuaForApps(const std::string& luaDir, const std::string& mainAppId,
     const fs::path dir(luaDir);
     fs::create_directories(dir, ec);   // 目录已存在不算错误
 
-    // 步骤 3：扫描现有的 .lua，内容里出现过主 appid 就什么都不做。
-    for (fs::directory_iterator it(dir, ec), endIt; !ec && it != endIt; it.increment(ec)) {
-        std::error_code fe;
-        if (!it->is_regular_file(fe) || fe) continue;
-        std::string ext = it->path().extension().string();
-        for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (ext != ".lua") continue;
+    // 步骤 3：<主 appid>.lua 已经存在（按文件名判断）就直接用接口的内容覆盖，不管里面原来是什么
+    // （2026-10-12 和使用者确认方案 A）。这样接口更新了 key 或 app 列表，下次激活能刷新文件。
+    // 覆盖是幂等的：内容完全由接口返回决定，重复执行结果一样。
+    // 之前的版本是"任何 .lua 里出现过主 appid 就什么都不做"，会让自己写的 <appid>.lua 永远刷新不了，
+    // 所以改成先看同名文件。
+    const fs::path target = dir / (mainId + ".lua");
+    const bool overwrite = fs::exists(target, ec);
 
-        std::ifstream in(it->path(), std::ios::binary);
-        if (!in) continue;
-        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (ContainsAppId(text, mainId)) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey lua: appid {} already in {}, nothing to do",
-                               mainId, it->path().filename().string());
-            return;
+    // 步骤 4：同名文件不存在时，才扫描其他 .lua：内容里出现过主 appid（别的文件已经加过）
+    // 就什么都不做，避免重复 addappid；都没有才新建。
+    if (!overwrite) {
+        for (fs::directory_iterator it(dir, ec), endIt; !ec && it != endIt; it.increment(ec)) {
+            std::error_code fe;
+            if (!it->is_regular_file(fe) || fe) continue;
+            std::string ext = it->path().extension().string();
+            for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (ext != ".lua") continue;
+
+            std::ifstream in(it->path(), std::ios::binary);
+            if (!in) continue;
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (ContainsAppId(text, mainId)) {
+                LOG_REGISTERCDKEY_DEBUG("CDKey lua: appid {} already in {}, nothing to do",
+                                   mainId, it->path().filename().string());
+                return;
+            }
         }
     }
 
-    // 步骤 4：没有就写 <主 appid>.lua，每个 app 一行。已经有同名文件（走到这里说明里面
-    // 没有这个 appid）时直接用接口的内容覆盖（2026-10-12 和使用者确认；之前是不覆盖只写日志）。
-    // 覆盖是幂等的：内容完全由接口返回决定，重复执行结果一样；下次再进来时文件里已经有
-    // 这个 appid，步骤 3 会直接返回。
-    const fs::path target = dir / (mainId + ".lua");
-    const bool overwrite = fs::exists(target, ec);
+    // 步骤 5：写 <主 appid>.lua，每个 app 一行。
     std::string content;
     for (const LuaApp* app : valid) {
         content += "addappid(" + app->appId + ", " + std::to_string(app->isApp);
@@ -534,6 +540,22 @@ void EnsureLuaForApps(const std::string& luaDir, const std::string& mainAppId,
             LOG_REGISTERCDKEY_DEBUG("CDKey lua: write failed {}", tmp.string());
             return;
         }
+    }
+    // 覆盖前先把旧文件备份成 <原文件名>.bak（即 <主 appid>.lua.bak，2026-10-12 和使用者确认）。
+    // 已有旧的 .bak 就被这次的替换，只保留最近一次的备份。
+    // 用"复制"而不是"改名"：改名会让 .lua 在两步之间短暂不存在，LuaFileWatcher 可能把它当成
+    // 删除处理；复制之后原文件一直在，直到下面的 rename 一步换成新内容。
+    // 备份失败就放弃覆盖：宁可这次不更新，也不能在没有备份的情况下丢掉原内容。
+    if (overwrite) {
+        const fs::path bak = dir / (mainId + ".lua.bak");
+        fs::copy_file(target, bak, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: backup to {} failed ({}), not overwriting",
+                               bak.string(), ec.message());
+            fs::remove(tmp, ec);
+            return;
+        }
+        LOG_REGISTERCDKEY_DEBUG("CDKey lua: backed up old file to {}", bak.string());
     }
     // rename 在目标已存在时会替换它（Windows 上 std::filesystem::rename 用的是
     // MOVEFILE_REPLACE_EXISTING），所以覆盖和新建走同一段代码；监视器看到的永远是完整的新内容。
