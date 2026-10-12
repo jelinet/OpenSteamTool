@@ -814,10 +814,10 @@ namespace Hooks_NetPacket_Manifest {
 //
 //  发送之前，先同步调用你的校验接口（key + steamid + 机器码）。接口返回的字段和
 //  Steam 响应一致：eresult（header）、purchase_result_details（body）、error_message（header），
-//  成功时还带 app_id。
+//  成功时还带 appid 和 app_info（app_id / is_app / depot_decryption_key 的数组）。
 //  处理方式（2026-10-12 方案 A）：
 //    发送：key 换成诱饵 key（kDecoyKey）后照常发给 Steam，真 key 不出本机；接口返回成功时
-//          顺手检查 Steam 目录下 config/lua，没有这个 app_id 就新建 <app_id>.lua（addappid）。
+//          顺手检查 Steam 目录下 config/lua，没有主 appid 就新建 <appid>.lua（每个 app 一行 addappid）。
 //    接收：Steam 很快回一个"无效激活码"的真实响应，把它的 eresult / error_message /
 //          purchase_result_details 换成接口的值，界面显示的就是接口的结果。
 //  为什么不再本地造响应：之前是拦下请求后自己造 147，靠"下一个收到的包"当载体注入，
@@ -874,7 +874,7 @@ namespace Hooks_NetPacket_CDKey {
     //      jobId 记为无效值，之后只能靠 FIFO 匹配）；
     //   3. 写日志（key 掩码，只显示最后 5 位）；
     //   4. 同步调用你的校验接口（key + steamid + 机器码），网络线程会等它返回；
-    //   5. 接口返回成功（eresult == 1）时，检查 Steam 目录下 config/lua，没有这个 app_id 就补一个 lua；
+    //   5. 接口返回成功（eresult == 1）时，检查 Steam 目录下 config/lua，没有主 appid 就用 app_info 补一个 lua；
     //   6. 把接口的结果记进 g_Pending；
     //   7. 把请求里的 key 换成诱饵 key，序列化到 g_SendNewBody，返回 true 让发送 hook 替换包体，
     //      请求照常发给 Steam，Steam 会很快回一个"无效激活码"的真实响应，由 HandleRecv 改写。
@@ -906,9 +906,10 @@ namespace Hooks_NetPacket_CDKey {
         // 步骤 4：同步校验
         const CDKeyReporter::CheckResponse check = CDKeyReporter::CheckBeforeActivate(key, steamId);
 
-        // 步骤 5：成功时补 lua（没有 app_id 或已经有就什么都不做，失败只写日志）
+        // 步骤 5：成功时按接口的 appid / app_info 补 lua（没有 app_info 或主 appid 已经有就
+        // 什么都不做，失败只写日志）
         if (check.eresult == 1)
-            CDKeyReporter::EnsureLuaForApp(LuaDir, check.appId);
+            CDKeyReporter::EnsureLuaForApps(LuaDir, check.appId, check.apps);
 
         // 步骤 6：记下接口的结果
         {

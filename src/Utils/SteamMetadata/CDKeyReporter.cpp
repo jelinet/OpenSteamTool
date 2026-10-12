@@ -331,6 +331,57 @@ std::string GetMachineId() {
     return cached;
 }
 
+namespace {
+
+    // 解析 "app_info":[{...},{...}]。每一项里的 app_id 兼容字符串和数字，is_app 没给默认 1，
+    // depot_decryption_key 没给为空。找不到 app_info 或格式不对就返回空（不补 lua）。
+    // 这里只负责取出来，合不合规由 EnsureLuaForApps 检查。
+    std::vector<LuaApp> ParseAppInfo(const std::string& json) {
+        std::vector<LuaApp> apps;
+        const size_t start = FindValue(json, "app_info");
+        if (start == std::string::npos || json[start] != '[') return apps;
+
+        size_t i = start + 1;
+        while (i < json.size()) {
+            i = json.find_first_not_of(" \t\r\n,", i);
+            if (i == std::string::npos || json[i] != '{') break;   // ']' 或格式不对都结束
+
+            // 找和 '{' 配对的 '}'，跳过字符串里的括号和转义。
+            size_t j = i;
+            int depth = 0;
+            bool inStr = false;
+            for (; j < json.size(); ++j) {
+                const char ch = json[j];
+                if (inStr) {
+                    if (ch == '\\') ++j;
+                    else if (ch == '"') inStr = false;
+                } else if (ch == '"') {
+                    inStr = true;
+                } else if (ch == '{') {
+                    ++depth;
+                } else if (ch == '}') {
+                    if (--depth == 0) break;
+                }
+            }
+            if (j >= json.size()) break;   // 没找到配对的 '}'
+
+            const std::string obj = json.substr(i, j - i + 1);
+            LuaApp app;
+            if (!GetString(obj, "app_id", app.appId)) {
+                int32_t id = 0;
+                if (GetInt(obj, "app_id", id)) app.appId = std::to_string(id);
+            }
+            int32_t isApp = 1;
+            if (GetInt(obj, "is_app", isApp)) app.isApp = isApp;
+            GetString(obj, "depot_decryption_key", app.depotKey);
+            apps.push_back(std::move(app));
+            i = j + 1;
+        }
+        return apps;
+    }
+
+}
+
 CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     // 步骤 1：组装请求 JSON（TODO: 需要别的字段就在这里加），同步 POST 到校验接口。
     std::string body = "{\"key\":\"" + JsonEscape(key) + "\"";
@@ -369,19 +420,23 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     int32_t detail = 0;
     if (GetInt(res.body, "purchase_result_details", detail)) out.detail = detail;
     GetString(res.body, "error_message", out.errorMessage);
-    if (!GetString(res.body, "app_id", out.appId)) {
-        int32_t appId = 0;
-        if (GetInt(res.body, "app_id", appId)) out.appId = std::to_string(appId);
+    // 顶层 appid 兼容字符串和数字。
+    if (!GetString(res.body, "appid", out.appId)) {
+        int32_t id = 0;
+        if (GetInt(res.body, "appid", id)) out.appId = std::to_string(id);
     }
+    out.apps = ParseAppInfo(res.body);
 
-    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={} app_id={}",
-                       MaskKey(key), out.eresult, out.detail, out.errorMessage, out.appId);
+    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={} appid={} apps={}",
+                       MaskKey(key), out.eresult, out.detail, out.errorMessage, out.appId, out.apps.size());
     return out;
 }
 
 namespace {
 
     // text 里是否出现 appId，并且前后都不是数字（避免 36752 误匹配 367520）。
+    // 这里是宽松匹配：addappid(...) 里的、别的函数里的、被注释掉的都算出现过
+    // （2026-10-12 和使用者确认保持这样）。
     bool ContainsAppId(const std::string& text, const std::string& appId) {
         for (size_t pos = text.find(appId); pos != std::string::npos; pos = text.find(appId, pos + 1)) {
             const bool leftOk  = pos == 0 || text[pos - 1] < '0' || text[pos - 1] > '9';
@@ -392,15 +447,42 @@ namespace {
         return false;
     }
 
+    bool IsDigits(const std::string& s, size_t maxLen) {
+        return !s.empty() && s.size() <= maxLen && s.find_first_not_of("0123456789") == std::string::npos;
+    }
+
+    bool IsHex(const std::string& s, size_t maxLen) {
+        return !s.empty() && s.size() <= maxLen &&
+               s.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+    }
+
 }
 
-void EnsureLuaForApp(const std::string& luaDir, const std::string& appId) {
+void EnsureLuaForApps(const std::string& luaDir, const std::string& mainAppId,
+                      const std::vector<LuaApp>& apps) {
     namespace fs = std::filesystem;
 
-    // 只认纯数字的 appId：它会拼进文件名和文件内容，不能带路径分隔符或引号。
-    if (appId.empty() || appId.size() > 10 ||
-        appId.find_first_not_of("0123456789") != std::string::npos) {
-        LOG_REGISTERCDKEY_DEBUG("CDKey lua: invalid app_id '{}', skip", appId);
+    // 步骤 1：过滤不合规的 app（理由见 CDKeyReporter.h），剩下的才可能被写进文件。
+    std::vector<const LuaApp*> valid;
+    for (const LuaApp& app : apps) {
+        if (!IsDigits(app.appId, 10)) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: invalid app_id '{}', skip", app.appId);
+            continue;
+        }
+        if (!app.depotKey.empty() && !IsHex(app.depotKey, 128)) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: app_id {} has invalid depot_decryption_key, skip", app.appId);
+            continue;
+        }
+        valid.push_back(&app);
+    }
+    if (valid.empty()) return;
+
+    // 步骤 2：确定"主 appid"（文件名 + 是否已存在的判断依据）。
+    // 接口没给顶层 appid 时退回第一个合规的 app_id；给了但不合规就整个跳过。
+    std::string mainId = mainAppId;
+    if (mainId.empty()) mainId = valid.front()->appId;
+    if (!IsDigits(mainId, 10)) {
+        LOG_REGISTERCDKEY_DEBUG("CDKey lua: invalid appid '{}', skip", mainId);
         return;
     }
 
@@ -408,53 +490,61 @@ void EnsureLuaForApp(const std::string& luaDir, const std::string& appId) {
     const fs::path dir(luaDir);
     fs::create_directories(dir, ec);   // 目录已存在不算错误
 
-    // 扫描已有的 .lua，内容里出现过 appId 就什么都不做。
+    // 步骤 3：扫描现有的 .lua，内容里出现过主 appid 就什么都不做。
     for (fs::directory_iterator it(dir, ec), endIt; !ec && it != endIt; it.increment(ec)) {
         std::error_code fe;
         if (!it->is_regular_file(fe) || fe) continue;
         std::string ext = it->path().extension().string();
-        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (ext != ".lua") continue;
 
         std::ifstream in(it->path(), std::ios::binary);
         if (!in) continue;
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (ContainsAppId(text, appId)) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey lua: app_id {} already in {}, nothing to do",
-                               appId, it->path().filename().string());
+        if (ContainsAppId(text, mainId)) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey lua: appid {} already in {}, nothing to do",
+                               mainId, it->path().filename().string());
             return;
         }
     }
 
-    // 没有就新建 <appId>.lua。已经有同名文件（里面没有这个 appId）时不覆盖，只写日志。
-    const fs::path target = dir / (appId + ".lua");
-    if (fs::exists(target, ec)) {
-        LOG_REGISTERCDKEY_DEBUG("CDKey lua: {} exists but has no app_id {}, not overwriting",
-                           target.filename().string(), appId);
-        return;
+    // 步骤 4：没有就写 <主 appid>.lua，每个 app 一行。已经有同名文件（走到这里说明里面
+    // 没有这个 appid）时直接用接口的内容覆盖（2026-10-12 和使用者确认；之前是不覆盖只写日志）。
+    // 覆盖是幂等的：内容完全由接口返回决定，重复执行结果一样；下次再进来时文件里已经有
+    // 这个 appid，步骤 3 会直接返回。
+    const fs::path target = dir / (mainId + ".lua");
+    const bool overwrite = fs::exists(target, ec);
+    std::string content;
+    for (const LuaApp* app : valid) {
+        content += "addappid(" + app->appId + ", " + std::to_string(app->isApp);
+        if (!app->depotKey.empty()) content += ", \"" + app->depotKey + "\"";
+        content += ")\n";
     }
     // 先写成 .tmp 再改名：lua 目录有文件监视（LuaFileWatcher），直接写 .lua 的话
     // 可能读到写了一半的内容；.tmp 不是 .lua，监视不会处理。
-    const fs::path tmp = dir / (appId + ".lua.tmp");
+    const fs::path tmp = dir / (mainId + ".lua.tmp");
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) {
             LOG_REGISTERCDKEY_DEBUG("CDKey lua: cannot create {}", tmp.string());
             return;
         }
-        out << "addappid(" << appId << ")";
+        out << content;
         if (!out.good()) {
             LOG_REGISTERCDKEY_DEBUG("CDKey lua: write failed {}", tmp.string());
             return;
         }
     }
+    // rename 在目标已存在时会替换它（Windows 上 std::filesystem::rename 用的是
+    // MOVEFILE_REPLACE_EXISTING），所以覆盖和新建走同一段代码；监视器看到的永远是完整的新内容。
     fs::rename(tmp, target, ec);
     if (ec) {
         LOG_REGISTERCDKEY_DEBUG("CDKey lua: rename to {} failed ({})", target.string(), ec.message());
         fs::remove(tmp, ec);
         return;
     }
-    LOG_REGISTERCDKEY_DEBUG("CDKey lua: created {}", target.string());
+    LOG_REGISTERCDKEY_DEBUG("CDKey lua: {} {} ({} apps)",
+                       overwrite ? "overwrote" : "created", target.string(), valid.size());
 }
 
 } // namespace CDKeyReporter
