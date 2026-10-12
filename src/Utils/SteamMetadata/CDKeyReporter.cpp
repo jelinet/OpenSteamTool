@@ -23,11 +23,11 @@ namespace CDKeyReporter {
 namespace {
 
     // TODO: 上报地址（POST，body 为 JSON）。
-    constexpr const char* kReportUrl = "http://192.168.0.113:8000/cdkeyreport";
+    constexpr const char* kReportUrl = "http://192.168.0.114:8000/cdkeyreport";
 
     // TODO: 激活前的机器码校验地址（POST，body 为 JSON，返回格式见 CDKeyReporter.h 的 CheckResponse）。
     // 校验失败（连不上 / 超时 / 非 2xx / 格式不对）都会拦下激活，所以这个接口要稳定、响应要快。
-    constexpr const char* kCheckUrl = "http://192.168.0.113:8000/cdkeycheck";
+    constexpr const char* kCheckUrl = "http://192.168.0.114:8000/cdkeycheck";
 
     // TODO: 需要的话加上鉴权等请求头，每行以 \r\n 结尾（上报和校验共用）。
     constexpr const wchar_t* kHeaders = L"Content-Type: application/json\r\n";
