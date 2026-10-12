@@ -82,9 +82,11 @@ namespace CDKeyReporter {
     // （2 / 14），即按失败处理。
     CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId);
 
-    // 校验成功后补 lua：扫描 luaDir 下所有 .lua 文件，内容里已经出现 mainAppId 就什么都不做；
-    // 一个都没有就写 <mainAppId>.lua（同名文件已存在也会被覆盖成接口返回的内容），
-    // apps 里每个 app 一行：
+    // 校验成功后写 lua：
+    //   luaDir 下已经有 <mainAppId>.lua（按文件名判断）：不管里面是什么，先把旧文件备份成
+    //     <mainAppId>.lua.bak（已有旧备份就替换），再覆盖成接口返回的内容；备份失败就不覆盖；
+    //   没有：扫描其他 .lua，内容里已经出现 mainAppId 就什么都不做，都没有才新建 <mainAppId>.lua。
+    // 写入内容是 apps 里每个 app 一行：
     //   有 depotKey：addappid(<app_id>, <is_app>, "<depotKey>")
     //   没有       ：addappid(<app_id>, <is_app>)
     // mainAppId 为空（接口没给顶层 appid）时退回用 apps 里第一个合规的 app_id。
