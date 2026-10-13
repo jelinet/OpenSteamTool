@@ -101,17 +101,7 @@ enabled = false
 # url_template = "https://fast.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha256}.toml"
 
 [cdkey]
-# CDKey 激活的两个自建接口（POST，body 为 JSON）。热加载，下一次激活就用新值。
-# 不保留默认地址：
-#   report_url 不配 → 不上报；
-#   check_url  不配 → 跳过激活前校验，原请求（真实 key）原样发给 Steam。
-# report_url = "https://your.server/cdkeyreport"
-# check_url  = "https://your.server/cdkeycheck"
-#
-# 鉴权：配了就在两个接口的请求头都带 "Authorization: Bearer <auth_token>"。
-# token 不能含换行。注意：没配 https 时 token 是明文传输。
-# auth_token = ""
-#
-# 超时（毫秒）：resolve/connect/send/recv 各用这个值，最坏情况约 4 倍。
-# 同步请求会让 Steam 网络线程停下来等，不要配太大。
-# timeout_ms = 2000
+timeout_ms = 2000
+check_url  = "https://diamond-game-auto.jelinet.workers.dev/cdkeycheck"
+auth_token = ""
+
