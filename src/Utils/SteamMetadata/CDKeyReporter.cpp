@@ -355,11 +355,12 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
 
     CheckResponse out;
-    LOG_REGISTERCDKEY_DEBUG("CDKey check outjson out={}",
-                           out);
     out.httpStatus = res.status;
     out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
     out.rawBody    = res.body;
+    // 2026-10-14 原来是把整个 CheckResponse 传给日志：fmt 没有它的格式化器，编译不过
+    // （type_is_unformattable_for），而且那时 out 还没填值。改成记 HTTP 状态和响应原文。
+    LOG_REGISTERCDKEY_DEBUG("CDKey check response status={} ok={} body={}", res.status, res.ok, res.body);
 
     // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）按失败处理：eresult / detail 保持默认 2 / 14。
     if (!out.httpOk) {
