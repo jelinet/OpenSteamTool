@@ -1,6 +1,7 @@
 #include "CDKeyReporter.h"
 
 #include "OSTPlatform/include/Http.h"
+#include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
 
 #include <cctype>
@@ -22,19 +23,22 @@
 namespace CDKeyReporter {
 namespace {
 
-    // TODO: 上报地址（POST，body 为 JSON）。
-    constexpr const char* kReportUrl = "http://192.168.0.114:8000/cdkeyreport";
+    // 上报 / 校验地址、鉴权 token、超时都在 opensteamtool.toml 的 [cdkey] 段（热加载），
+    // 见 Config::CdkeySettings。每次请求现取，不缓存，改完 toml 下一次请求就用新值。
+    // 同步请求会让 Steam 网络线程停下来等，resolve/connect/send/recv 各用 timeout_ms，
+    // 最坏情况约 4 倍，所以不要配太大。
 
-    // TODO: 激活前的机器码校验地址（POST，body 为 JSON，返回格式见 CDKeyReporter.h 的 CheckResponse）。
-    // 校验失败（连不上 / 超时 / 非 2xx / 格式不对）都会拦下激活，所以这个接口要稳定、响应要快。
-    constexpr const char* kCheckUrl = "http://192.168.0.114:8000/cdkeycheck";
-
-    // TODO: 需要的话加上鉴权等请求头，每行以 \r\n 结尾（上报和校验共用）。
-    constexpr const wchar_t* kHeaders = L"Content-Type: application/json\r\n";
-
-    // TODO: 超时（毫秒，上报和校验共用）。同步上报会让 Steam 网络线程停下来等，
-    // 解析 / 连接 / 发送 / 接收各用这个值，最坏情况约 4 倍。不要设太大。
-    constexpr uint32_t kTimeoutMs = 2000;
+    // 请求头：Content-Type 固定；token 非空时带 Bearer 鉴权（上报和校验共用同一个 token）。
+    // token 只允许可见 ASCII（Config 里已经拒绝了 CR/LF），逐字节扩成 wchar_t 即可。
+    std::wstring BuildHeaders(const std::string& authToken) {
+        std::wstring h = L"Content-Type: application/json\r\n";
+        if (!authToken.empty()) {
+            h += L"Authorization: Bearer ";
+            h.append(authToken.begin(), authToken.end());
+            h += L"\r\n";
+        }
+        return h;
+    }
 
     // EPurchaseResultDetail 中和 CDKey 激活相关的常见值
     // （完整列表见 SteamKit 的 enums.steamd）。
@@ -271,13 +275,20 @@ std::string MaskKey(const std::string& key) {
 
 ServerResponse SendReport(const Report& r) {
     // 步骤 1：同步上报。在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
-    const std::string body = BuildJson(r);
-    auto res = OSTPlatform::Http::Execute(L"POST", kReportUrl,
-                                          body.data(), static_cast<uint32_t>(body.size()),
-                                          kHeaders,
-                                          kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
-
+    const Config::CdkeySettings cfg = Config::GetCdkeySettings();
     ServerResponse out;
+    if (cfg.reportUrl.empty()) {
+        // 没配地址就不上报（不保留默认地址，2026-10-13 和使用者确认）。
+        LOG_REGISTERCDKEY_DEBUG("CDKey report skipped key={}: cdkey.report_url not set", MaskKey(r.key));
+        return out;
+    }
+    const std::string body = BuildJson(r);
+    const std::wstring headers = BuildHeaders(cfg.authToken);
+    auto res = OSTPlatform::Http::Execute(L"POST", cfg.reportUrl.c_str(),
+                                          body.data(), static_cast<uint32_t>(body.size()),
+                                          headers.c_str(),
+                                          cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
+
     out.httpStatus = res.status;
     out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
     out.rawBody    = res.body;
@@ -387,10 +398,12 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     std::string body = "{\"key\":\"" + JsonEscape(key) + "\"";
     body += ",\"steamid\":\"" + std::to_string(steamId) + "\"";
     body += ",\"machine_id\":\"" + JsonEscape(GetMachineId()) + "\"}";
-    auto res = OSTPlatform::Http::Execute(L"POST", kCheckUrl,
+    const Config::CdkeySettings cfg = Config::GetCdkeySettings();
+    const std::wstring headers = BuildHeaders(cfg.authToken);
+    auto res = OSTPlatform::Http::Execute(L"POST", cfg.checkUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
-                                          kHeaders,
-                                          kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+                                          headers.c_str(),
+                                          cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
 
     CheckResponse out;
     out.httpStatus = res.status;
