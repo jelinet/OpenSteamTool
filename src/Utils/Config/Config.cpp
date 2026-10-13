@@ -88,27 +88,6 @@ namespace {
         Snapshot snapshot = MakeDefaultSnapshot(configPath);
         if (!std::filesystem::exists(configPath)) {
             LOG_INFO("Config file not found, using defaults");
-            // [cdkey]
-            if (auto cdkey = tbl["cdkey"].as_table()) {
-                if (auto val = (*cdkey)["base_url"].value<std::string>()) {
-                    // 去掉末尾 '/'，免得和 "/cdkeycheck" 拼出 "//cdkeycheck"。
-                    std::string url = *val;
-                    while (!url.empty() && url.back() == '/') url.pop_back();
-                    snapshot.cdkey.baseUrl = std::move(url);
-                }
-                if (auto val = (*cdkey)["report_enabled"].value<bool>())
-                    snapshot.cdkey.reportEnabled = *val;
-                if (auto val = (*cdkey)["auth_token"].value<std::string>()) {
-                    // 含 CR/LF 的 token 会让人往请求头里塞额外的头（header injection），直接丢弃。
-                    if (val->find_first_of("\r\n") == std::string::npos)
-                        snapshot.cdkey.authToken = *val;
-                    else
-                        LOG_WARN("cdkey.auth_token contains CR/LF, ignored");
-                }
-                if (auto val = (*cdkey)["timeout_ms"].value<int64_t>())
-                    snapshot.cdkey.timeoutMs = static_cast<uint32_t>(*val);
-            }
-
             ApplyManifestProvider(snapshot.manifestProvider);
             LoadResult result = ApplySnapshotLocked(snapshot);
             LOG_INFO("Config loaded: manifest.url={} log.level={} lua.paths={} stats.enable_api={} remote.url_template={}",
@@ -190,6 +169,27 @@ namespace {
                     snapshot.cloud.enabled = *val;
                 if (auto val = (*cloud)["library"].value<std::string>())
                     snapshot.cloud.library = *val;
+            }
+
+            // [cdkey]
+            if (auto cdkey = tbl["cdkey"].as_table()) {
+                if (auto val = (*cdkey)["base_url"].value<std::string>()) {
+                    // 去掉末尾 '/'，免得和 "/cdkeycheck" 拼出 "//cdkeycheck"。
+                    std::string url = *val;
+                    while (!url.empty() && url.back() == '/') url.pop_back();
+                    snapshot.cdkey.baseUrl = std::move(url);
+                }
+                if (auto val = (*cdkey)["report_enabled"].value<bool>())
+                    snapshot.cdkey.reportEnabled = *val;
+                if (auto val = (*cdkey)["auth_token"].value<std::string>()) {
+                    // 含 CR/LF 的 token 会让人往请求头里塞额外的头（header injection），直接丢弃。
+                    if (val->find_first_of("\r\n") == std::string::npos)
+                        snapshot.cdkey.authToken = *val;
+                    else
+                        LOG_WARN("cdkey.auth_token contains CR/LF, ignored");
+                }
+                if (auto val = (*cdkey)["timeout_ms"].value<int64_t>())
+                    snapshot.cdkey.timeoutMs = static_cast<uint32_t>(*val);
             }
 
             ApplyManifestProvider(snapshot.manifestProvider);
