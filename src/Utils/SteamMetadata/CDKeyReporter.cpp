@@ -348,12 +348,15 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     // 调用方（Hooks_NetPacket）已保证 base_url 非空才会走到这里；热加载在两者之间把它清空的话，
     // 拼出来的 "/cdkeycheck" 不是合法 URL，Execute 会失败并走下面的失败分支，不会崩。
     const std::string checkUrl = cfg.baseUrl + kCheckPath;
+    LOG_REGISTERCDKEY_DEBUG("CDKey check url={},body={}", checkUrl, body.data());
     auto res = OSTPlatform::Http::Execute(L"POST", checkUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
 
     CheckResponse out;
+    LOG_REGISTERCDKEY_DEBUG("CDKey check outjson out={}",
+                           out);
     out.httpStatus = res.status;
     out.httpOk     = res.ok && res.status >= 200 && res.status < 300;
     out.rawBody    = res.body;
