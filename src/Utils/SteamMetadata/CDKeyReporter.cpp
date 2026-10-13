@@ -163,6 +163,20 @@ namespace {
         return false;   // 字符串没有结束引号
     }
 
+    // 读取字符串字段；值写成裸数字（如 "token":123）时也接受，按原文取出。
+    // 用于 token / stat 这类接口可能返回数字的字段；空串和找不到都返回 false。
+    bool GetStringOrNumber(const std::string& json, const char* name, std::string& out) {
+        if (GetString(json, name, out)) return !out.empty();
+        const size_t pos = FindValue(json, name);
+        if (pos == std::string::npos) return false;
+        size_t end = pos;
+        while (end < json.size() && (json[end] == '-' || json[end] == '.' ||
+                                     (json[end] >= '0' && json[end] <= '9'))) ++end;
+        if (end == pos) return false;
+        out = json.substr(pos, end - pos);
+        return true;
+    }
+
     // 读取布尔字段，只认 true / false。
     bool GetBool(const std::string& json, const char* name, bool& out) {
         size_t pos = FindValue(json, name);
@@ -449,9 +463,16 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
         if (GetInt(res.body, "appid", id)) out.appId = std::to_string(id);
     }
     out.apps = ParseAppInfo(res.body);
+    // 这四个字段没给、为空、或不是字符串/数字都保持空，lua 里就不写对应那一行。
+    GetStringOrNumber(res.body, "token", out.extras.token);
+    GetStringOrNumber(res.body, "app_ticket", out.extras.appTicket);
+    GetStringOrNumber(res.body, "e_ticket", out.extras.eTicket);
+    GetStringOrNumber(res.body, "stat", out.extras.stat);
 
-    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={} appid={} apps={}",
-                       MaskKey(key), out.eresult, out.detail, out.errorMessage, out.appId, out.apps.size());
+    LOG_REGISTERCDKEY_DEBUG("CDKey check key={} eresult={} detail={} error_message={} appid={} apps={} token={} app_ticket={} e_ticket={} stat={}",
+                       MaskKey(key), out.eresult, out.detail, out.errorMessage, out.appId, out.apps.size(),
+                       !out.extras.token.empty(), !out.extras.appTicket.empty(),
+                       !out.extras.eTicket.empty(), !out.extras.stat.empty());
     return out;
 }
 
@@ -482,7 +503,7 @@ namespace {
 }
 
 void EnsureLuaForApps(const std::string& luaDir, const std::string& mainAppId,
-                      const std::vector<LuaApp>& apps) {
+                      const std::vector<LuaApp>& apps, const LuaExtras& extras) {
     namespace fs = std::filesystem;
 
     // 步骤 1：过滤不合规的 app（理由见 CDKeyReporter.h），剩下的才可能被写进文件。
@@ -542,13 +563,22 @@ void EnsureLuaForApps(const std::string& luaDir, const std::string& mainAppId,
         }
     }
 
-    // 步骤 5：写 <主 appid>.lua，每个 app 一行。
+    // 步骤 5：写 <主 appid>.lua，每个 app 一行，后面接 token / ticket / stat。
     std::string content;
     for (const LuaApp* app : valid) {
         content += "addappid(" + app->appId + ", " + std::to_string(app->isApp);
         if (!app->depotKey.empty()) content += ", \"" + app->depotKey + "\"";
         content += ")\n";
     }
+    // 主 appid 已在步骤 2 校验过全是数字，所以第一个参数不带引号是安全的；
+    // 第二个参数按使用者要求原样写（见 LuaExtras 的说明）。
+    const auto appendExtra = [&](const char* func, const std::string& value) {
+        if (!value.empty()) content += std::string(func) + "(" + mainId + ", \"" + value + "\")\n";
+    };
+    appendExtra("addtoken", extras.token);
+    appendExtra("setAppTicket", extras.appTicket);
+    appendExtra("setETicket", extras.eTicket);
+    appendExtra("setStat", extras.stat);
     // 先写成 .tmp 再改名：lua 目录有文件监视（LuaFileWatcher），直接写 .lua 的话
     // 可能读到写了一半的内容；.tmp 不是 .lua，监视不会处理。
     const fs::path tmp = dir / (mainId + ".lua.tmp");
