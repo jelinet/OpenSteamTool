@@ -858,7 +858,7 @@ namespace Hooks_NetPacket_CDKey {
 
         // 什么都不做，失败只写日志）
         if (check.eresult == 1)
-            CDKeyReporter::EnsureLuaForApps(LuaDir, check.appId, check.apps);
+            CDKeyReporter::EnsureLuaForApps(LuaDir, check.appId, check.apps, check.extras);
 
         // 步骤 6：记下接口的结果
         {
