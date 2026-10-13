@@ -348,7 +348,6 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     // 调用方（Hooks_NetPacket）已保证 base_url 非空才会走到这里；热加载在两者之间把它清空的话，
     // 拼出来的 "/cdkeycheck" 不是合法 URL，Execute 会失败并走下面的失败分支，不会崩。
     const std::string checkUrl = cfg.baseUrl + kCheckPath;
-    LOG_REGISTERCDKEY_DEBUG("CDKey check url={},body={}", checkUrl, body.data());
     auto res = OSTPlatform::Http::Execute(L"POST", checkUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
@@ -360,7 +359,10 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     out.rawBody    = res.body;
     // 2026-10-14 原来是把整个 CheckResponse 传给日志：fmt 没有它的格式化器，编译不过
     // （type_is_unformattable_for），而且那时 out 还没填值。改成记 HTTP 状态和响应原文。
-    LOG_REGISTERCDKEY_DEBUG("CDKey check response status={} ok={} body={}", res.status, res.ok, res.body);
+    // 请求 URL、请求参数、返回结果合成一条，方便对照（2026-10-14 使用者要求）。
+    // 注意：请求参数是完整的 key 和机器码，返回里可能有 token/ticket，没打码；排查完建议删掉这条。
+    LOG_REGISTERCDKEY_DEBUG("CDKey check url={} request={} status={} ok={} response={}",
+                            checkUrl, body, res.status, res.ok, res.body);
 
     // 步骤 2：HTTP 失败（网络错误、超时、非 2xx）按失败处理：eresult / detail 保持默认 2 / 14。
     if (!out.httpOk) {
