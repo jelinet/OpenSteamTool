@@ -26,12 +26,15 @@ namespace Config {
         std::string library;
     };
 
-    // [cdkey] — CDKeyReporter 的两个接口。
-    // 所有字段都不设默认地址：没配 report_url 就不上报，没配 check_url 就跳过校验并放行
+    // [cdkey] — CDKeyReporter 的接口域名。toml 里只配域名（base_url），具体路径
+    // （/cdkeycheck、/cdkeyreport）写死在 CDKeyReporter.cpp。
+    // 不设默认域名：没配 base_url 就不上报、也跳过校验并放行
     // （2026-10-13 和使用者确认；不把内网地址编进二进制）。
+    // 2026-10-13 起 report_url/check_url 两个键废弃（不再读取）：路径是代码和服务端之间的约定，
+    // 不该让使用者在 toml 里逐条配；上报单独留 report_enabled 开关。
     struct CdkeySettings {
-        std::string reportUrl;
-        std::string checkUrl;
+        std::string baseUrl;            // 已去掉末尾 '/'，如 "https://host"
+        bool        reportEnabled = true;
         std::string authToken;          // 非空时两个接口都带 "Authorization: Bearer <token>"
         uint32_t    timeoutMs = 2000;   // resolve/connect/send/recv 各用这个值
     };
@@ -84,8 +87,8 @@ namespace Config {
     inline std::string cloudLibrary;
 
     // [cdkey]
-    inline std::string cdkeyReportUrl;
-    inline std::string cdkeyCheckUrl;
+    inline std::string cdkeyBaseUrl;
+    inline bool        cdkeyReportEnabled = true;
     inline std::string cdkeyAuthToken;
     inline uint32_t    cdkeyTimeoutMs = 2000;
 

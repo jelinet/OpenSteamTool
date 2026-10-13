@@ -845,11 +845,11 @@ namespace Hooks_NetPacket_CDKey {
         const std::string key = req.activation_code();
         LOG_REGISTERCDKEY_DEBUG("CDKey send: key={} jobid={}", CDKeyReporter::MaskKey(key), jobId);
 
-        // 步骤 4：没配 cdkey.check_url 就跳过校验并放行：返回 false 且不设 g_SuppressSend，
+        // 步骤 4：没配 cdkey.base_url 就跳过校验并放行：返回 false 且不设 g_SuppressSend，
         // 原请求（真实 key）原样发给 Steam，也不会在 g_Pending 里留记录，HandleRecv 照常透传。
         // 2026-10-13 和使用者确认；每次现取，toml 热加载后下一次激活就生效。
-        if (Config::GetCdkeySettings().checkUrl.empty()) {
-            LOG_REGISTERCDKEY_DEBUG("CDKey send: cdkey.check_url not set, skip check and pass through");
+        if (Config::GetCdkeySettings().baseUrl.empty()) {
+            LOG_REGISTERCDKEY_DEBUG("CDKey send: cdkey.base_url not set, skip check and pass through");
             return false;
         }
 

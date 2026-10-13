@@ -102,11 +102,13 @@ enabled = false
 
 [cdkey]
 # CDKey 激活的两个自建接口（POST，body 为 JSON）。热加载，下一次激活就用新值。
-# 不保留默认地址：
-#   report_url 不配 → 不上报；
-#   check_url  不配 → 跳过激活前校验，原请求（真实 key）原样发给 Steam。
-# report_url = "https://your.server/cdkeyreport"
-# check_url  = "https://your.server/cdkeycheck"
+# 这里只配域名，路径写死在代码里：校验 <base_url>/cdkeycheck，上报 <base_url>/cdkeyreport。
+# 不保留默认域名：base_url 不配 → 不上报，并跳过激活前校验，原请求（真实 key）原样发给 Steam。
+# 末尾的 "/" 会被忽略。
+# base_url = "https://your.server"
+#
+# 上报开关：base_url 配了默认就上报；设为 false 只关上报，校验照常。
+# report_enabled = true
 #
 # 鉴权：配了就在两个接口的请求头都带 "Authorization: Bearer <auth_token>"。
 # token 不能含换行。注意：没配 https 时 token 是明文传输。

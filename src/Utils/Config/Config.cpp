@@ -59,8 +59,8 @@ namespace {
         injectLibraryX64       = snapshot.injection.libraryX64;
         cloudEnabled           = snapshot.cloud.enabled;
         cloudLibrary           = snapshot.cloud.library;
-        cdkeyReportUrl         = snapshot.cdkey.reportUrl;
-        cdkeyCheckUrl          = snapshot.cdkey.checkUrl;
+        cdkeyBaseUrl           = snapshot.cdkey.baseUrl;
+        cdkeyReportEnabled     = snapshot.cdkey.reportEnabled;
         cdkeyAuthToken         = snapshot.cdkey.authToken;
         cdkeyTimeoutMs         = snapshot.cdkey.timeoutMs;
     }
@@ -90,10 +90,14 @@ namespace {
             LOG_INFO("Config file not found, using defaults");
             // [cdkey]
             if (auto cdkey = tbl["cdkey"].as_table()) {
-                if (auto val = (*cdkey)["report_url"].value<std::string>())
-                    snapshot.cdkey.reportUrl = *val;
-                if (auto val = (*cdkey)["check_url"].value<std::string>())
-                    snapshot.cdkey.checkUrl = *val;
+                if (auto val = (*cdkey)["base_url"].value<std::string>()) {
+                    // 去掉末尾 '/'，免得和 "/cdkeycheck" 拼出 "//cdkeycheck"。
+                    std::string url = *val;
+                    while (!url.empty() && url.back() == '/') url.pop_back();
+                    snapshot.cdkey.baseUrl = std::move(url);
+                }
+                if (auto val = (*cdkey)["report_enabled"].value<bool>())
+                    snapshot.cdkey.reportEnabled = *val;
                 if (auto val = (*cdkey)["auth_token"].value<std::string>()) {
                     // 含 CR/LF 的 token 会让人往请求头里塞额外的头（header injection），直接丢弃。
                     if (val->find_first_of("\r\n") == std::string::npos)
@@ -266,8 +270,8 @@ namespace {
     CdkeySettings GetCdkeySettings() {
         std::lock_guard lock(g_mutex);
         return {
-            cdkeyReportUrl,
-            cdkeyCheckUrl,
+            cdkeyBaseUrl,
+            cdkeyReportEnabled,
             cdkeyAuthToken,
             cdkeyTimeoutMs,
         };

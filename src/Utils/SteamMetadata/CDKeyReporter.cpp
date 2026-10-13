@@ -23,7 +23,12 @@
 namespace CDKeyReporter {
 namespace {
 
-    // 上报 / 校验地址、鉴权 token、超时都在 opensteamtool.toml 的 [cdkey] 段（热加载），
+    // 接口路径写死在代码里，toml 只配域名（cdkey.base_url）：路径是代码和服务端之间的约定，
+    // 不该让使用者逐条配（2026-10-13 和使用者确认）。改路径时服务端要同步改。
+    constexpr char kCheckPath[]  = "/cdkeycheck";
+    constexpr char kReportPath[] = "/cdkeyreport";
+
+    // 上报 / 校验域名、鉴权 token、超时都在 opensteamtool.toml 的 [cdkey] 段（热加载），
     // 见 Config::CdkeySettings。每次请求现取，不缓存，改完 toml 下一次请求就用新值。
     // 同步请求会让 Steam 网络线程停下来等，resolve/connect/send/recv 各用 timeout_ms，
     // 最坏情况约 4 倍，所以不要配太大。
@@ -277,14 +282,16 @@ ServerResponse SendReport(const Report& r) {
     // 步骤 1：同步上报。在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
     const Config::CdkeySettings cfg = Config::GetCdkeySettings();
     ServerResponse out;
-    if (cfg.reportUrl.empty()) {
-        // 没配地址就不上报（不保留默认地址，2026-10-13 和使用者确认）。
-        LOG_REGISTERCDKEY_DEBUG("CDKey report skipped key={}: cdkey.report_url not set", MaskKey(r.key));
+    if (cfg.baseUrl.empty() || !cfg.reportEnabled) {
+        // 没配域名（不保留默认地址，2026-10-13 和使用者确认）或 report_enabled=false 就不上报。
+        LOG_REGISTERCDKEY_DEBUG("CDKey report skipped key={}: {}", MaskKey(r.key),
+                                cfg.baseUrl.empty() ? "cdkey.base_url not set" : "cdkey.report_enabled=false");
         return out;
     }
+    const std::string reportUrl = cfg.baseUrl + kReportPath;
     const std::string body = BuildJson(r);
     const std::wstring headers = BuildHeaders(cfg.authToken);
-    auto res = OSTPlatform::Http::Execute(L"POST", cfg.reportUrl.c_str(),
+    auto res = OSTPlatform::Http::Execute(L"POST", reportUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
@@ -400,7 +407,10 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     body += ",\"machine_id\":\"" + JsonEscape(GetMachineId()) + "\"}";
     const Config::CdkeySettings cfg = Config::GetCdkeySettings();
     const std::wstring headers = BuildHeaders(cfg.authToken);
-    auto res = OSTPlatform::Http::Execute(L"POST", cfg.checkUrl.c_str(),
+    // 调用方（Hooks_NetPacket）已保证 base_url 非空才会走到这里；热加载在两者之间把它清空的话，
+    // 拼出来的 "/cdkeycheck" 不是合法 URL，Execute 会失败并走下面的失败分支，不会崩。
+    const std::string checkUrl = cfg.baseUrl + kCheckPath;
+    auto res = OSTPlatform::Http::Execute(L"POST", checkUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
