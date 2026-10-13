@@ -23,13 +23,11 @@
 namespace CDKeyReporter {
 namespace {
 
-    // 上报 / 校验地址、鉴权 token、超时都在 opensteamtool.toml 的 [cdkey] 段（热加载），
-    // 见 Config::CdkeySettings。每次请求现取，不缓存，改完 toml 下一次请求就用新值。
-    // 同步请求会让 Steam 网络线程停下来等，resolve/connect/send/recv 各用 timeout_ms，
-    // 最坏情况约 4 倍，所以不要配太大。
 
-    // 请求头：Content-Type 固定；token 非空时带 Bearer 鉴权（上报和校验共用同一个 token）。
-    // token 只允许可见 ASCII（Config 里已经拒绝了 CR/LF），逐字节扩成 wchar_t 即可。
+    constexpr char kCheckPath[]  = "/cdkeycheck";
+    constexpr char kReportPath[] = "/cdkeyreport";
+
+
     std::wstring BuildHeaders(const std::string& authToken) {
         std::wstring h = L"Content-Type: application/json\r\n";
         if (!authToken.empty()) {
@@ -40,14 +38,13 @@ namespace {
         return h;
     }
 
-    // EPurchaseResultDetail 中和 CDKey 激活相关的常见值
-    // （完整列表见 SteamKit 的 enums.steamd）。
-    constexpr int32_t kDetailAlreadyPurchased        = 9;    // 账号已拥有该游戏
-    constexpr int32_t kDetailRestrictedCountry       = 13;   // 锁区
-    constexpr int32_t kDetailBadActivationCode       = 14;   // 无效 key
-    constexpr int32_t kDetailDuplicateActivationCode = 15;   // key 已被其他账号激活
-    constexpr int32_t kDetailDoesNotOwnRequiredApp   = 24;   // 需要先拥有本体
-    constexpr int32_t kDetailRateLimited             = 53;   // 尝试次数过多
+
+    constexpr int32_t kDetailAlreadyPurchased        = 9;
+    constexpr int32_t kDetailRestrictedCountry       = 13;
+    constexpr int32_t kDetailBadActivationCode       = 14;
+    constexpr int32_t kDetailDuplicateActivationCode = 15;
+    constexpr int32_t kDetailDoesNotOwnRequiredApp   = 24;
+    constexpr int32_t kDetailRateLimited             = 53;
 
     constexpr int32_t kEResultOK = 1;
 
@@ -212,14 +209,16 @@ ServerResponse SendReport(const Report& r) {
     // 步骤 1：同步上报。在调用方线程（Steam 网络线程）里直接发请求，返回后才继续处理这个包。
     const Config::CdkeySettings cfg = Config::GetCdkeySettings();
     ServerResponse out;
-    if (cfg.reportUrl.empty()) {
-        // 没配地址就不上报（不保留默认地址，2026-10-13 和使用者确认）。
-        LOG_REGISTERCDKEY_DEBUG("CDKey report skipped key={}: cdkey.report_url not set", MaskKey(r.key));
+    if (cfg.baseUrl.empty() || !cfg.reportEnabled) {
+        // 没配域名（不保留默认地址，2026-10-13 和使用者确认）或 report_enabled=false 就不上报。
+        LOG_REGISTERCDKEY_DEBUG("CDKey report skipped key={}: {}", MaskKey(r.key),
+                                cfg.baseUrl.empty() ? "cdkey.base_url not set" : "cdkey.report_enabled=false");
         return out;
     }
+    const std::string reportUrl = cfg.baseUrl + kReportPath;
     const std::string body = BuildJson(r);
     const std::wstring headers = BuildHeaders(cfg.authToken);
-    auto res = OSTPlatform::Http::Execute(L"POST", cfg.reportUrl.c_str(),
+    auto res = OSTPlatform::Http::Execute(L"POST", reportUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);
@@ -279,12 +278,9 @@ std::string GetMachineId() {
 
 namespace {
 
-    // 解析 "app_info":[{...},{...}]。每一项里的 app_id 兼容字符串和数字，is_app 没给默认 1，
-    // depot_decryption_key 没给为空。找不到 app_info 或格式不对就返回空（不补 lua）。
-    // 这里只负责取出来，合不合规由 EnsureLuaForApps 检查。
     std::vector<LuaApp> ParseAppInfo(const std::string& json) {
         std::vector<LuaApp> apps;
-        const size_t start = FindValue(json, "app_info");
+        const size_t start = FindValue(json, "depot_key");
         if (start == std::string::npos || json[start] != '[') return apps;
 
         size_t i = start + 1;
@@ -335,7 +331,10 @@ CheckResponse CheckBeforeActivate(const std::string& key, uint64_t steamId) {
     body += ",\"machine_id\":\"" + JsonEscape(GetMachineId()) + "\"}";
     const Config::CdkeySettings cfg = Config::GetCdkeySettings();
     const std::wstring headers = BuildHeaders(cfg.authToken);
-    auto res = OSTPlatform::Http::Execute(L"POST", cfg.checkUrl.c_str(),
+    // 调用方（Hooks_NetPacket）已保证 base_url 非空才会走到这里；热加载在两者之间把它清空的话，
+    // 拼出来的 "/cdkeycheck" 不是合法 URL，Execute 会失败并走下面的失败分支，不会崩。
+    const std::string checkUrl = cfg.baseUrl + kCheckPath;
+    auto res = OSTPlatform::Http::Execute(L"POST", checkUrl.c_str(),
                                           body.data(), static_cast<uint32_t>(body.size()),
                                           headers.c_str(),
                                           cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs, cfg.timeoutMs);

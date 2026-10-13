@@ -102,6 +102,5 @@ enabled = false
 
 [cdkey]
 timeout_ms = 2000
-check_url  = "https://diamond-game-auto.jelinet.workers.dev/cdkeycheck"
+base_url  = "https://diamond-game-auto.jelinet.workers.dev"
 auth_token = ""
-

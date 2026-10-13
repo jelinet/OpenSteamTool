@@ -26,14 +26,11 @@ namespace Config {
         std::string library;
     };
 
-    // [cdkey] — CDKeyReporter 的两个接口。
-    // 所有字段都不设默认地址：没配 report_url 就不上报，没配 check_url 就跳过校验并放行
-    // （2026-10-13 和使用者确认；不把内网地址编进二进制）。
     struct CdkeySettings {
-        std::string reportUrl;
-        std::string checkUrl;
-        std::string authToken;          // 非空时两个接口都带 "Authorization: Bearer <token>"
-        uint32_t    timeoutMs = 2000;   // resolve/connect/send/recv 各用这个值
+        std::string baseUrl;            
+        bool        reportEnabled = false;
+        std::string authToken;          
+        uint32_t    timeoutMs = 2000;
     };
 
     struct LoadResult {
@@ -84,8 +81,8 @@ namespace Config {
     inline std::string cloudLibrary;
 
     // [cdkey]
-    inline std::string cdkeyReportUrl;
-    inline std::string cdkeyCheckUrl;
+    inline std::string cdkeyBaseUrl;
+    inline bool        cdkeyReportEnabled = true;
     inline std::string cdkeyAuthToken;
     inline uint32_t    cdkeyTimeoutMs = 2000;
 
