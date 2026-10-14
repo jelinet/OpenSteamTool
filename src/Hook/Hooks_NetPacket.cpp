@@ -129,6 +129,7 @@ namespace {
     constexpr uint32 HASH_JOB_NotifyRunningApps = Fnv1aHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats = Fnv1aHash("Player.GetUserStats#1");
     constexpr uint32 HASH_JOB_GetManifestRequestCode = Fnv1aHash("ContentServerDirectory.GetManifestRequestCode#1");
+    constexpr uint32 HASH_JOB_RegisterCDKey = Fnv1aHash("Store.RegisterCDKey#1");                          // 激活 CDKey
 
 } // anonymous namespace
 
