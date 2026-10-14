@@ -887,15 +887,17 @@ namespace Hooks_NetPacket_CDKey {
     void HandleRecv(const uint8* pBody, uint32 cbBody,
                     const uint8* pHdr, uint32 cbHdr)
     {
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: parsing response...");
         // 步骤 1：解析 header 和 body
         CMsgProtoBufHeader hdr;
         CStore_RegisterCDKey_Response resp;
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: header size={} body size={}", cbHdr, cbBody);
         if (!hdr.ParseFromArray(pHdr, cbHdr) || !resp.ParseFromArray(pBody, cbBody)) {
             LOG_REGISTERCDKEY_DEBUG("CDKey recv: failed to parse response, pass through");
             return;
         }
         const uint64 jobId = hdr.jobid_target();
-
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: jobid={}", jobId);
         // 步骤 2：找到对应的请求并移出队列（花括号限定锁的范围）
         Pending pending;
         {
@@ -904,10 +906,15 @@ namespace Hooks_NetPacket_CDKey {
             if (IsValidJobId(jobId)) {
                 // 优先用 jobid_target 精确匹配对应的请求。
                 for (auto i = g_Pending.begin(); i != g_Pending.end(); ++i)
-                    if (i->jobId == jobId) { it = i; break; }
+                    if (i->jobId == jobId) 
+                    {
+                        LOG_REGISTERCDKEY_DEBUG("CDKey recv: found pending request for jobid={}", jobId);
+                        it = i; break; 
+                    }
             } else if (!g_Pending.empty()) {
                 // 响应没带 job id 时，按发送顺序取最早的一个。
                 it = g_Pending.begin();
+                LOG_REGISTERCDKEY_DEBUG("CDKey recv: no jobid in response, using first pending request for jobid={}", it->jobId);
             }
             if (it == g_Pending.end()) {
                 LOG_REGISTERCDKEY_DEBUG("CDKey recv: no pending request for jobid={}", jobId);
@@ -941,6 +948,7 @@ namespace Hooks_NetPacket_CDKey {
         g_cbNewBody = cbNewBody;
         g_NeedReplaceHdr  = true;
         g_NeedReplaceBody = true;
+        LOG_REGISTERCDKEY_DEBUG("CDKey recv: replacement encoded, will replace header and body");
     }
 
 } // namespace Hooks_NetPacket_CDKey
