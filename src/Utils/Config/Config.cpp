@@ -141,11 +141,8 @@ namespace {
             }
 
             // [remote]
-            auto remote1 = tbl["remote"].as_table();
-            LOG_INFO("Config: [remote] table {}", remote1 ? "found" : "NOT found");
             if (auto remote = tbl["remote"].as_table()) {
                 if (auto val = (*remote)["url_template"].value<std::string>()) {
-                    LOG_INFO("Config: remote.url_template={}", *val);
                     snapshot.remoteUrlTemplate = *val;
                 }
             }
