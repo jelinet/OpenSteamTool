@@ -77,7 +77,7 @@ namespace {
         // Ignore calls when appId is not resolved or not in Lua config
         if (!LuaConfig::HasDepot(Hooks_Misc::ResolveAppId())) 
         {
-            LOG_REGISTERCDKEY_INFO("IPC: appid={} not in addappid, skip handler dispatch", Hooks_Misc::ResolveAppId());
+            LOG_REGISTERCDKEY_DEBUG("IPC: appid={} not in addappid, skip handler dispatch", Hooks_Misc::ResolveAppId());
             return dispatch;
         }
 
@@ -85,7 +85,7 @@ namespace {
         IPCMessages::IPCInterfaceCall call{request.body()};
         if (!call.ok()) 
         {
-            LOG_REGISTERCDKEY_INFO("IPC: failed to parse interface call, skip handler dispatch");
+            LOG_REGISTERCDKEY_DEBUG("IPC: failed to parse interface call, skip handler dispatch");
             return dispatch;
         }
 
@@ -93,7 +93,7 @@ namespace {
         dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());
         if (!dispatch.handler) 
         {
-            LOG_REGISTERCDKEY_INFO("IPC: no handler for interfaceID={} funcHash=0x{:08X}, skip", call.interfaceID(), call.funcHash());
+            LOG_REGISTERCDKEY_DEBUG("IPC: no handler for interfaceID={} funcHash=0x{:08X}, skip", call.interfaceID(), call.funcHash());
             return dispatch;
         }
         LOG_IPC_TRACE("Resolved IPC handler: {}", dispatch.DebugString());
