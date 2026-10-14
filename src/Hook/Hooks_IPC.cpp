@@ -75,16 +75,27 @@ namespace {
         if (request.command() != EIPCCommand::InterfaceCall) return dispatch;
 
         // Ignore calls when appId is not resolved or not in Lua config
-        if (!LuaConfig::HasDepot(Hooks_Misc::ResolveAppId())) return dispatch;
+        if (!LuaConfig::HasDepot(Hooks_Misc::ResolveAppId())) 
+        {
+            LOG_REGISTERCDKEY_INFO("IPC: appid={} not in addappid, skip handler dispatch", Hooks_Misc::ResolveAppId());
+            return dispatch;
+        }
 
         // Parse out the interface call header to find the handler
         IPCMessages::IPCInterfaceCall call{request.body()};
-        if (!call.ok()) return dispatch;
+        if (!call.ok()) 
+        {
+            LOG_REGISTERCDKEY_INFO("IPC: failed to parse interface call, skip handler dispatch");
+            return dispatch;
+        }
 
         // Lookup handler by interface ID + method hash
         dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());
-        if (!dispatch.handler) return dispatch;
-
+        if (!dispatch.handler) 
+        {
+            LOG_REGISTERCDKEY_INFO("IPC: no handler for interfaceID={} funcHash=0x{:08X}, skip", call.interfaceID(), call.funcHash());
+            return dispatch;
+        }
         LOG_IPC_TRACE("Resolved IPC handler: {}", dispatch.DebugString());
         return dispatch;
     }

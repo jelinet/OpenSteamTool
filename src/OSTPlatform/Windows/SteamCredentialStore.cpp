@@ -49,40 +49,47 @@ Status FromLStatus(LSTATUS status) {
 // reports the byte count, second fills the buffer. `out` is overwritten only on
 // success; left untouched on any failure.
 LSTATUS ReadBinaryValue(uint32_t appId, PCWSTR valueName, std::vector<uint8_t>& out) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: reading {} for appid={}", ValueNameForLog(valueName), appId);
     const std::wstring keyPath = SteamAppKeyPath(appId);
-
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: reading {} for appid={} keyPath={}", ValueNameForLog(valueName), appId, keyPath);
     DWORD bytes = 0;
     LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, keyPath.c_str(), valueName,
                                   RRF_RT_REG_BINARY, nullptr, nullptr, &bytes);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read {} for appid={} status={} bytes={}", ValueNameForLog(valueName), appId, status, bytes);                              
     if (status != ERROR_SUCCESS) {
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to query {} size for appid={} status={}", ValueNameForLog(valueName), appId, status);
         const auto mapped = FromLStatus(status);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: mapped status for {} appid={} is {}", ValueNameForLog(valueName), appId, ToString(mapped));
         if (mapped == Status::NotFound) {
-            OSTP_LOG_DEBUG("SteamCredentialStore: {} missing for appid={} status={}",
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: {} missing for appid={} status={}",
                            ValueNameForLog(valueName), appId, status);
         } else {
-            OSTP_LOG_WARN("SteamCredentialStore: failed to query {} size for appid={} status={}",
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to query {} size for appid={} status={}",
                           ValueNameForLog(valueName), appId, status);
         }
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: returning mapped status for {} appid={} is {}", ValueNameForLog(valueName), appId, ToString(mapped));
         return status;
     }
     if (bytes == 0) {
-        OSTP_LOG_DEBUG("SteamCredentialStore: {} empty for appid={}", ValueNameForLog(valueName), appId);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: {} empty for appid={}", ValueNameForLog(valueName), appId);
         out.clear();
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: returning ERROR_SUCCESS for {} appid={} (empty)", ValueNameForLog(valueName), appId);
         return ERROR_SUCCESS;
     }
 
     std::vector<uint8_t> buffer(bytes);
     status = RegGetValueW(HKEY_CURRENT_USER, keyPath.c_str(), valueName,
                           RRF_RT_REG_BINARY, nullptr, buffer.data(), &bytes);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read {} for appid={} status={} bytes={}", ValueNameForLog(valueName), appId, status, bytes);                      
     if (status != ERROR_SUCCESS) {
-        OSTP_LOG_WARN("SteamCredentialStore: failed to read {} for appid={} status={}",
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to read {} for appid={} status={}",
                       ValueNameForLog(valueName), appId, status);
         return status;
     }
 
     buffer.resize(bytes);
     out = std::move(buffer);
-    OSTP_LOG_DEBUG("SteamCredentialStore: read {} for appid={} bytes={}",
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read {} for appid={} bytes={}",
                    ValueNameForLog(valueName), appId, out.size());
     return ERROR_SUCCESS;
 }
@@ -94,18 +101,18 @@ LSTATUS WriteValue(uint32_t appId, PCWSTR valueName, DWORD type, const BYTE* dat
     LSTATUS status = RegCreateKeyExW(HKEY_CURRENT_USER, SteamAppKeyPath(appId).c_str(), 0, nullptr,
                                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, key.put(), nullptr);
     if (status != ERROR_SUCCESS) {
-        OSTP_LOG_WARN("SteamCredentialStore: failed to create/open app key appid={} status={}", appId, status);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to create/open app key appid={} status={}", appId, status);
         return status;
     }
 
     status = RegSetValueExW(key.get(), valueName, 0, type, data, bytes);
     if (status != ERROR_SUCCESS) {
-        OSTP_LOG_WARN("SteamCredentialStore: failed to write {} for appid={} bytes={} status={}",
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to write {} for appid={} bytes={} status={}",
                       ValueNameForLog(valueName), appId, bytes, status);
         return status;
     }
 
-    OSTP_LOG_INFO("SteamCredentialStore: wrote {} for appid={} bytes={}",
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: wrote {} for appid={} bytes={}",
                   ValueNameForLog(valueName), appId, bytes);
     return ERROR_SUCCESS;
 }
@@ -123,48 +130,56 @@ const char* ToString(Status status) {
 }
 
 Status GetAppTicket(uint32_t appId, std::vector<uint8_t>& ticket) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: GetAppTicket for appid={}", appId);
     return FromLStatus(ReadBinaryValue(appId, kValueAppTicket, ticket));
 }
 
 Status WriteAppTicket(uint32_t appId, const std::vector<uint8_t>& data) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: WriteAppTicket for appid={}", appId);
     return FromLStatus(WriteValue(appId, kValueAppTicket, REG_BINARY,
                                   reinterpret_cast<const BYTE*>(data.data()), static_cast<DWORD>(data.size())));
 }
 
 Status GetETicket(uint32_t appId, std::vector<uint8_t>& ticket) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: GetETicket for appid={}", appId);
     return FromLStatus(ReadBinaryValue(appId, kValueEncryptedTicket, ticket));
 }
 
 Status WriteETicket(uint32_t appId, const std::vector<uint8_t>& data) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: WriteETicket for appid={}", appId);
     return FromLStatus(WriteValue(appId, kValueEncryptedTicket, REG_BINARY,
                                   reinterpret_cast<const BYTE*>(data.data()), static_cast<DWORD>(data.size())));
 }
 
 Status GetSteamId(uint32_t appId, uint64_t& steamId) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: GetSteamId for appid={}", appId);
     const std::wstring keyPath = SteamAppKeyPath(appId);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: GetSteamId for appid={} keyPath={}", appId, keyPath);
 
     DWORD bytes = 0;
     LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, keyPath.c_str(), kValueSteamId,
                                   RRF_RT_REG_SZ, nullptr, nullptr, &bytes);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: queried SteamID size for appid={} status={} bytes={}", appId, status, bytes);                              
     if (status != ERROR_SUCCESS) {
         const auto mapped = FromLStatus(status);
         if (mapped == Status::NotFound) {
-            OSTP_LOG_DEBUG("SteamCredentialStore: SteamID missing for appid={} status={}", appId, status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: SteamID missing for appid={} status={}", appId, status);
         } else {
-            OSTP_LOG_WARN("SteamCredentialStore: failed to query SteamID size for appid={} status={}", appId, status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to query SteamID size for appid={} status={}", appId, status);
         }
         return mapped;
     }
     if (bytes < sizeof(wchar_t)) {
-        OSTP_LOG_WARN("SteamCredentialStore: SteamID value too short for appid={} bytes={}", appId, bytes);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: SteamID value too short for appid={} bytes={}", appId, bytes);
         return Status::NotFound;
     }
 
     std::wstring raw(bytes / sizeof(wchar_t), L'\0');
     status = RegGetValueW(HKEY_CURRENT_USER, keyPath.c_str(), kValueSteamId,
                           RRF_RT_REG_SZ, nullptr, raw.data(), &bytes);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read SteamID for appid={} status={} bytes={}", appId, status, bytes);                      
     if (status != ERROR_SUCCESS) {
-        OSTP_LOG_WARN("SteamCredentialStore: failed to read SteamID for appid={} status={}", appId, status);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to read SteamID for appid={} status={}", appId, status);
         return FromLStatus(status);
     }
 
@@ -176,12 +191,12 @@ Status GetSteamId(uint32_t appId, uint64_t& steamId) {
     // A present-but-empty/zero/unparseable value is treated as "no credential".
     const auto parsed = Numbers::ParseUInt64(raw);
     if (!parsed || *parsed == 0) {
-        OSTP_LOG_WARN("SteamCredentialStore: SteamID value invalid for appid={}", appId);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: SteamID value invalid for appid={}", appId);
         return Status::NotFound;
     }
 
     steamId = *parsed;
-    OSTP_LOG_DEBUG("SteamCredentialStore: read SteamID for appid={} steamid={}", appId, steamId);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read SteamID for appid={} steamid={}", appId, steamId);
     return Status::Ok;
 }
 
@@ -193,42 +208,46 @@ Status WriteSteamId(uint32_t appId, uint64_t steamId) {
 }
 
 Status GetActiveUser(uint32_t& accountId, std::wstring& universe) {
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: GetActiveUser");
     DWORD activeUser = 0;
     DWORD bytes = sizeof(activeUser);
     LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, kActiveProcessKeyPath, kValueActiveUser,
                                   RRF_RT_REG_DWORD, nullptr, &activeUser, &bytes);
+
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: queried ActiveUser size status={} bytes={}", status, bytes);
     if (status != ERROR_SUCCESS) {
         const auto mapped = FromLStatus(status);
         if (mapped == Status::NotFound) {
-            OSTP_LOG_DEBUG("SteamCredentialStore: ActiveUser missing status={}", status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveUser missing status={}", status);
         } else {
-            OSTP_LOG_WARN("SteamCredentialStore: failed to read ActiveUser status={}", status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to read ActiveUser status={}", status);
         }
         return mapped;
     }
     if (bytes != sizeof(activeUser)) {
-        OSTP_LOG_WARN("SteamCredentialStore: ActiveUser has unexpected size bytes={}", bytes);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveUser has unexpected size bytes={}", bytes);
         return Status::NotFound;
     }
     if (activeUser == 0) {
-        OSTP_LOG_DEBUG("SteamCredentialStore: ActiveUser is zero");
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveUser is zero");
         return Status::NotFound;
     }
 
     bytes = 0;
     status = RegGetValueW(HKEY_CURRENT_USER, kActiveProcessKeyPath, kValueUniverse,
                           RRF_RT_REG_SZ, nullptr, nullptr, &bytes);
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: queried ActiveProcess Universe size status={} bytes={}", status, bytes);
     if (status != ERROR_SUCCESS) {
         const auto mapped = FromLStatus(status);
         if (mapped == Status::NotFound) {
-            OSTP_LOG_DEBUG("SteamCredentialStore: ActiveProcess Universe missing status={}", status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveProcess Universe missing status={}", status);
         } else {
-            OSTP_LOG_WARN("SteamCredentialStore: failed to query ActiveProcess Universe size status={}", status);
+            LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to query ActiveProcess Universe size status={}", status);
         }
         return mapped;
     }
     if (bytes < sizeof(wchar_t)) {
-        OSTP_LOG_WARN("SteamCredentialStore: ActiveProcess Universe value too short bytes={}", bytes);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveProcess Universe value too short bytes={}", bytes);
         return Status::NotFound;
     }
 
@@ -236,21 +255,21 @@ Status GetActiveUser(uint32_t& accountId, std::wstring& universe) {
     status = RegGetValueW(HKEY_CURRENT_USER, kActiveProcessKeyPath, kValueUniverse,
                           RRF_RT_REG_SZ, nullptr, rawUniverse.data(), &bytes);
     if (status != ERROR_SUCCESS) {
-        OSTP_LOG_WARN("SteamCredentialStore: failed to read ActiveProcess Universe status={}", status);
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: failed to read ActiveProcess Universe status={}", status);
         return FromLStatus(status);
     }
 
     const size_t chars = bytes / sizeof(wchar_t);
     rawUniverse.resize(chars > 0 ? chars - 1 : 0);
     if (rawUniverse.empty()) {
-        OSTP_LOG_WARN("SteamCredentialStore: ActiveProcess Universe is empty");
+        LOG_REGISTERCDKEY_INFO("SteamCredentialStore: ActiveProcess Universe is empty");
         return Status::NotFound;
     }
 
     accountId = activeUser;
     universe = std::move(rawUniverse);
-    OSTP_LOG_DEBUG("SteamCredentialStore: read ActiveUser accountid={} universe={}({} chars)",
-                   accountId, Encoding::WideToUtf8(universe), universe.size());
+    LOG_REGISTERCDKEY_INFO("SteamCredentialStore: read ActiveUser accountid={} universe={}({} chars)",
+                           accountId, Encoding::WideToUtf8(universe), universe.size());
     return Status::Ok;
 }
 
