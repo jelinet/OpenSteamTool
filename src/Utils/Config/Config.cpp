@@ -86,6 +86,7 @@ namespace {
 
     LoadResult Load(const std::string& configPath) {
         Snapshot snapshot = MakeDefaultSnapshot(configPath);
+
         if (!std::filesystem::exists(configPath)) {
             LOG_INFO("Config file not found, using defaults");
             ApplyManifestProvider(snapshot.manifestProvider);
@@ -141,7 +142,9 @@ namespace {
 
             // [remote]
             if (auto remote = tbl["remote"].as_table()) {
+                LOG_INFO("Config: remote={}", remote->to_string());
                 if (auto val = (*remote)["url_template"].value<std::string>()) {
+                    LOG_INFO.("Config: remote.url_template={}", *val);
                     snapshot.remoteUrlTemplate = *val;
                 }
             }
