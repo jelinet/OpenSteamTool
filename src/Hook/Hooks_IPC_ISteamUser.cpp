@@ -37,40 +37,61 @@ namespace {
     void HandlerPost_IClientUser_GetAppOwnershipTicketExtendedData(CPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite)
     {
         GetAppOwnershipTicketExtendedDataReq req{pRead};
-        if (!req.ok()) return;
+        if (!req.ok()) 
+        {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: failed to read request");
+            return;
+        }
 
-        LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData:{}", req.DebugString());
-        if (req.cbMaxTicket() < 0) return;
+        LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData:{}", req.DebugString());
+        if (req.cbMaxTicket() < 0) 
+        {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: invalid ticket size");
+            return;
+        }
 
         AppTicket::AppOwnershipTicket ticket{};
         AppId_t appId = req.unAppID() == kOnlineFixAppId ? Hooks_Misc::ResolveAppId() : req.unAppID();
         
         AppTicket::AppTicketSource ticketSource;
         if (PipeManager::DenuvoAuth::IsAuthorizedPipe(pipe)) {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} in authorization window, credential store available", appId);
             ticketSource = AppTicket::AppTicketSource::CredentialStoreOnly;
         } else {
-            LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} not in authorization window, only forge available", appId);
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} not in authorization window, only forge available", appId);
             ticketSource = AppTicket::AppTicketSource::ForgeOnly;
         }        
-        if (!AppTicket::GetAppOwnershipTicket(appId, ticket, ticketSource)) return;
+        if (!AppTicket::GetAppOwnershipTicket(appId, ticket, ticketSource)) 
+        {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} failed to get ownership ticket", appId);
+            return;
+        }
 
         if (ticket.data.size() > static_cast<size_t>(req.cbMaxTicket())) {
-            LOG_IPC_WARN("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} ticket too large ({} bytes) for buffer ({} bytes)",
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} ticket too large ({} bytes) for buffer ({} bytes)",
                          appId, ticket.data.size(), req.cbMaxTicket());
             return;
         }
 
         GetAppOwnershipTicketExtendedDataResp resp{pWrite, static_cast<size_t>(req.cbMaxTicket())};
-        if (!resp.ok()) return;
+        if (!resp.ok()) 
+        {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} failed to create response", appId);
+            return;
+        }
 
         resp.set_returnValue(ticket.totalSize);
-        if (!resp.set_pTicket(ticket.data)) return;
+        if (!resp.set_pTicket(ticket.data)) 
+        {
+            LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} failed to set ticket", appId);
+            return;
+        }
         resp.set_piAppId(ticket.appIdOffset);
         resp.set_piSteamId(ticket.steamIdOffset);
         resp.set_piSignature(ticket.signatureOffset);
         resp.set_pcbSignature(ticket.signatureSize);
 
-        LOG_IPC_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} {}", 
+        LOG_REGISTERCDKEY_DEBUG("IClientUser::GetAppOwnershipTicketExtendedData: AppId={} {}", 
                         appId,resp.DebugString());
     }
 
