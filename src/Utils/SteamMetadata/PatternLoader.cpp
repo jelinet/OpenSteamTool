@@ -285,7 +285,7 @@ void ReportMissingFunctions()
         list +
         "\nHooks for these functions are disabled for this session.\n\n"
         "Please report this at:\n"
-        "https://github.com/madoiscool/OpenSteamTool/issues");
+        "https://github.com/OpenSteam001/OpenSteamTool/issues");
 }
 
 } // namespace PatternLoader
