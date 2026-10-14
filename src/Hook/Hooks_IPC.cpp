@@ -93,7 +93,8 @@ namespace {
         dispatch.handler = FindHandler(call.interfaceID(), call.funcHash());
         if (!dispatch.handler) 
         {
-            LOG_REGISTERCDKEY_DEBUG("IPC: no handler for interfaceID={} funcHash=0x{:08X}, skip", call.interfaceID(), call.funcHash());
+            LOG_REGISTERCDKEY_DEBUG("IPC: no handler for interfaceID={} funcHash=0x{:08X}, skip",
+                                    static_cast<int>(call.interfaceID()), static_cast<uint32_t>(call.funcHash()));
             return dispatch;
         }
         LOG_IPC_TRACE("Resolved IPC handler: {}", dispatch.DebugString());
