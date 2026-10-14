@@ -76,8 +76,10 @@ namespace {
 
         // Ignore calls when appId is not resolved or not in Lua config
         if (!LuaConfig::HasDepot(Hooks_Misc::ResolveAppId())) 
-        {
-            LOG_REGISTERCDKEY_DEBUG("IPC: appid={} not in addappid, skip handler dispatch", Hooks_Misc::ResolveAppId());
+        {   if(Hooks_Misc::ResolveAppId()!=0)
+            {
+                LOG_REGISTERCDKEY_DEBUG("IPC: appid={} not in addappid, skip handler dispatch", Hooks_Misc::ResolveAppId());
+            }
             return dispatch;
         }
 
